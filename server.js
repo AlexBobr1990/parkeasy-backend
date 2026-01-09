@@ -1,23 +1,21 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// Берём URL из переменной окружения или используем дефолтный
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
-
-// Порт тоже из переменной окружения (Railway сам задаёт PORT)
 const PORT = process.env.PORT || 3001;
 
 // ==================== SCHEMAS ====================
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
+  password: { type: String },
   name: { type: String, required: true },
   balance: { type: Number, default: 50 },
   car: {
@@ -27,6 +25,31 @@ const userSchema = new mongoose.Schema({
   avatar: String,
   language: { type: String, default: 'ru' },
   isAdmin: { type: Boolean, default: false },
+  
+  // Верификация email
+  emailVerified: { type: Boolean, default: false },
+  verificationCode: String,
+  verificationExpires: Date,
+  
+  // OAuth
+  googleId: String,
+  appleId: String,
+  authProvider: { type: String, enum: ['email', 'google', 'apple'], default: 'email' },
+  
+  // Реферальная система
+  referralCode: { type: String, unique: true },
+  referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  referralCount: { type: Number, default: 0 },
+  
+  // Рейтинг
+  rating: { type: Number, default: 5.0 },
+  ratingCount: { type: Number, default: 0 },
+  totalRatingSum: { type: Number, default: 0 },
+  
+  // Соглашение
+  acceptedTerms: { type: Boolean, default: false },
+  acceptedTermsAt: Date,
+  
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -43,9 +66,11 @@ const parkingSchema = new mongoose.Schema({
   confirmedAt: Date,
   ownerCar: { brand: String, model: String, color: String, plate: String, size: String, length: Number, width: Number },
   ownerAvatar: String,
+  ownerRating: Number,
   bookerCar: { brand: String, model: String, color: String, plate: String, size: String, length: Number, width: Number },
   bookerName: String,
   bookerAvatar: String,
+  bookerRating: Number,
   bookerLocation: { lat: Number, lng: Number },
   comment: { type: String, default: '' },
   extensionsUsed: { type: Number, default: 0 },
@@ -74,13 +99,18 @@ const bookingSchema = new mongoose.Schema({
   ownerEarnings: Number,
   platformFee: Number,
   status: { type: String, default: 'active' },
+  
+  // Рейтинги после завершения
+  ownerRatedBooker: { type: Boolean, default: false },
+  bookerRatedOwner: { type: Boolean, default: false },
+  
   completedAt: Date,
   createdAt: { type: Date, default: Date.now }
 });
 
 const transactionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty'], required: true },
+  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral'], required: true },
   amount: { type: Number, required: true },
   description: { type: String, required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -88,17 +118,38 @@ const transactionSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+const ratingSchema = new mongoose.Schema({
+  fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
+  rating: { type: Number, required: true, min: 1, max: 5 },
+  problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'other'] }],
+  comment: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
 const User = mongoose.model('User', userSchema);
 const Parking = mongoose.model('Parking', parkingSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
+const Rating = mongoose.model('Rating', ratingSchema);
+
+// ==================== HELPERS ====================
+
+function generateReferralCode() {
+  return 'PB' + crypto.randomBytes(4).toString('hex').toUpperCase();
+}
+
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
 // ==================== CONNECT ====================
 
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB подключена!');
-    createDemoData();
+    createAdminIfNeeded();
   })
   .catch(err => console.error('❌ Ошибка MongoDB:', err));
 
@@ -119,30 +170,185 @@ setInterval(async () => {
 
 // ==================== ROUTES ====================
 
-// Главная страница
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'ParkEasy API is running!' });
+  res.json({ status: 'ok', message: 'ParkBro API is running!', version: '2.0' });
 });
 
 // ==================== AUTH ====================
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, name, car, referralCode, acceptedTerms } = req.body;
+    
+    if (!acceptedTerms) {
+      return res.status(400).json({ success: false, message: 'Необходимо принять пользовательское соглашение' });
+    }
+    
+    const lowerEmail = email.toLowerCase().trim();
+    
+    if (await User.findOne({ email: lowerEmail })) {
+      return res.status(400).json({ success: false, message: 'Email уже зарегистрирован' });
+    }
+    
+    let bonusAmount = 50;
+    let referrer = null;
+    
+    // Проверяем реферальный код
+    if (referralCode) {
+      referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
+      if (referrer) {
+        bonusAmount = 70; // Бонус за использование реф кода
+      }
+    }
+    
+    const verificationCode = generateVerificationCode();
+    
+    const newUser = new User({
+      email: lowerEmail,
+      password,
+      name: name.trim(),
+      balance: bonusAmount,
+      car,
+      language: 'ru',
+      referralCode: generateReferralCode(),
+      referredBy: referrer?._id,
+      acceptedTerms: true,
+      acceptedTermsAt: new Date(),
+      verificationCode,
+      verificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 часа
+      emailVerified: false
+    });
+    
+    await newUser.save();
+    
+    // Начисляем бонус рефереру
+    if (referrer) {
+      referrer.balance += 20;
+      referrer.referralCount += 1;
+      await referrer.save();
+      
+      await new Transaction({
+        userId: referrer._id,
+        type: 'referral',
+        amount: 20,
+        description: `Реферальный бонус за ${name.trim()}`
+      }).save();
+    }
+    
+    // Транзакция бонуса за регистрацию
+    await new Transaction({
+      userId: newUser._id,
+      type: 'bonus',
+      amount: bonusAmount,
+      description: referrer ? 'Бонус за регистрацию по реферальному коду' : 'Бонус за регистрацию'
+    }).save();
+    
+    // TODO: Отправить email с кодом верификации
+    console.log(`📧 Код верификации для ${lowerEmail}: ${verificationCode}`);
+    
+    res.json({
+      success: true,
+      message: 'Регистрация успешна! Проверьте email для подтверждения.',
+      user: {
+        id: newUser._id.toString(),
+        email: newUser.email,
+        name: newUser.name,
+        balance: newUser.balance,
+        car: newUser.car,
+        language: 'ru',
+        referralCode: newUser.referralCode,
+        rating: newUser.rating,
+        emailVerified: newUser.emailVerified
+      },
+      verificationRequired: true
+    });
+  } catch (error) {
+    console.error('Register error:', error);
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    }
+    
+    if (user.emailVerified) {
+      return res.json({ success: true, message: 'Email уже подтверждён' });
+    }
+    
+    if (user.verificationCode !== code) {
+      return res.status(400).json({ success: false, message: 'Неверный код' });
+    }
+    
+    if (user.verificationExpires < new Date()) {
+      return res.status(400).json({ success: false, message: 'Код истёк. Запросите новый.' });
+    }
+    
+    user.emailVerified = true;
+    user.verificationCode = null;
+    user.verificationExpires = null;
+    await user.save();
+    
+    res.json({ success: true, message: 'Email подтверждён!' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    }
+    
+    if (user.emailVerified) {
+      return res.json({ success: true, message: 'Email уже подтверждён' });
+    }
+    
+    const verificationCode = generateVerificationCode();
+    user.verificationCode = verificationCode;
+    user.verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+    
+    // TODO: Отправить email
+    console.log(`📧 Новый код верификации для ${email}: ${verificationCode}`);
+    
+    res.json({ success: true, message: 'Код отправлен повторно' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email: email.toLowerCase(), password });
+    
     if (user) {
-      res.json({ 
-        success: true, 
-        user: { 
-          id: user._id.toString(), 
-          email: user.email, 
-          name: user.name, 
-          balance: user.balance, 
-          car: user.car, 
-          avatar: user.avatar, 
+      res.json({
+        success: true,
+        user: {
+          id: user._id.toString(),
+          email: user.email,
+          name: user.name,
+          balance: user.balance,
+          car: user.car,
+          avatar: user.avatar,
           language: user.language || 'ru',
-          isAdmin: user.isAdmin || false
-        } 
+          isAdmin: user.isAdmin || false,
+          referralCode: user.referralCode,
+          rating: user.rating,
+          ratingCount: user.ratingCount,
+          emailVerified: user.emailVerified
+        }
       });
     } else {
       res.status(401).json({ success: false, message: 'Неверный email или пароль' });
@@ -152,25 +358,191 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/google', async (req, res) => {
   try {
-    const { email, password, name, car } = req.body;
-    const lowerEmail = email.toLowerCase();
-    if (await User.findOne({ email: lowerEmail })) {
-      return res.status(400).json({ success: false, message: 'Email уже зарегистрирован' });
+    const { googleId, email, name, avatar } = req.body;
+    
+    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
+    
+    if (user) {
+      // Обновляем googleId если пользователь существует
+      if (!user.googleId) {
+        user.googleId = googleId;
+        user.authProvider = 'google';
+        await user.save();
+      }
+    } else {
+      // Создаём нового пользователя
+      user = new User({
+        email: email.toLowerCase(),
+        name,
+        avatar,
+        googleId,
+        authProvider: 'google',
+        balance: 50,
+        referralCode: generateReferralCode(),
+        emailVerified: true, // Google уже верифицировал
+        acceptedTerms: true,
+        acceptedTermsAt: new Date()
+      });
+      await user.save();
+      
+      await new Transaction({
+        userId: user._id,
+        type: 'bonus',
+        amount: 50,
+        description: 'Бонус за регистрацию'
+      }).save();
     }
-    const newUser = new User({ email: lowerEmail, password, name, balance: 50, car, language: 'ru' });
-    await newUser.save();
     
-    await new Transaction({ userId: newUser._id, type: 'bonus', amount: 50, description: 'Бонус за регистрацию' }).save();
-    
-    res.json({ 
-      success: true, 
-      message: 'Регистрация успешна! +50 баллов', 
-      user: { id: newUser._id.toString(), email: newUser.email, name: newUser.name, balance: newUser.balance, car: newUser.car, language: 'ru' } 
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        balance: user.balance,
+        car: user.car,
+        avatar: user.avatar,
+        language: user.language || 'ru',
+        isAdmin: user.isAdmin || false,
+        referralCode: user.referralCode,
+        rating: user.rating,
+        emailVerified: user.emailVerified
+      }
     });
   } catch (error) {
+    console.error('Google auth error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/auth/apple', async (req, res) => {
+  try {
+    const { appleId, email, name } = req.body;
+    
+    let user = await User.findOne({ $or: [{ appleId }, { email: email?.toLowerCase() }] });
+    
+    if (user) {
+      if (!user.appleId) {
+        user.appleId = appleId;
+        user.authProvider = 'apple';
+        await user.save();
+      }
+    } else {
+      user = new User({
+        email: email?.toLowerCase() || `apple_${appleId}@private.relay`,
+        name: name || 'Пользователь',
+        appleId,
+        authProvider: 'apple',
+        balance: 50,
+        referralCode: generateReferralCode(),
+        emailVerified: true,
+        acceptedTerms: true,
+        acceptedTermsAt: new Date()
+      });
+      await user.save();
+      
+      await new Transaction({
+        userId: user._id,
+        type: 'bonus',
+        amount: 50,
+        description: 'Бонус за регистрацию'
+      }).save();
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        balance: user.balance,
+        car: user.car,
+        avatar: user.avatar,
+        language: user.language || 'ru',
+        isAdmin: user.isAdmin || false,
+        referralCode: user.referralCode,
+        rating: user.rating,
+        emailVerified: user.emailVerified
+      }
+    });
+  } catch (error) {
+    console.error('Apple auth error:', error);
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+// ==================== RATING ====================
+
+app.post('/api/ratings', async (req, res) => {
+  try {
+    const { fromUserId, toUserId, bookingId, rating, problems, comment } = req.body;
+    
+    // Проверяем что бронирование существует и завершено
+    const booking = await Booking.findById(bookingId);
+    if (!booking || booking.status !== 'completed') {
+      return res.status(400).json({ success: false, message: 'Бронирование не найдено или не завершено' });
+    }
+    
+    // Проверяем что пользователь участвовал в бронировании
+    const isOwner = booking.ownerId.toString() === fromUserId;
+    const isBooker = booking.userId.toString() === fromUserId;
+    
+    if (!isOwner && !isBooker) {
+      return res.status(403).json({ success: false, message: 'Вы не участвовали в этом бронировании' });
+    }
+    
+    // Проверяем что ещё не ставили оценку
+    const existingRating = await Rating.findOne({ fromUserId, bookingId });
+    if (existingRating) {
+      return res.status(400).json({ success: false, message: 'Вы уже оставили оценку' });
+    }
+    
+    // Создаём рейтинг
+    const newRating = new Rating({
+      fromUserId,
+      toUserId,
+      bookingId,
+      rating,
+      problems: problems || [],
+      comment
+    });
+    await newRating.save();
+    
+    // Обновляем рейтинг пользователя
+    const targetUser = await User.findById(toUserId);
+    if (targetUser) {
+      targetUser.totalRatingSum += rating;
+      targetUser.ratingCount += 1;
+      targetUser.rating = targetUser.totalRatingSum / targetUser.ratingCount;
+      await targetUser.save();
+    }
+    
+    // Обновляем статус оценки в бронировании
+    if (isOwner) {
+      booking.ownerRatedBooker = true;
+    } else {
+      booking.bookerRatedOwner = true;
+    }
+    await booking.save();
+    
+    res.json({ success: true, message: 'Оценка сохранена' });
+  } catch (error) {
+    console.error('Rating error:', error);
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+app.get('/api/users/:id/ratings', async (req, res) => {
+  try {
+    const ratings = await Rating.find({ toUserId: req.params.id })
+      .populate('fromUserId', 'name avatar')
+      .sort({ createdAt: -1 })
+      .limit(20);
+    res.json(ratings);
+  } catch (error) {
+    res.json([]);
   }
 });
 
@@ -192,7 +564,7 @@ app.get('/api/users/:id/history', async (req, res) => {
 app.get('/api/parkings/nearby', async (req, res) => {
   try {
     const parkings = await Parking.find({ status: 'available', timeToLeave: { $gt: 0 } })
-      .populate('ownerId', 'name car avatar');
+      .populate('ownerId', 'name car avatar rating ratingCount');
     res.json(parkings);
   } catch (error) {
     res.status(500).json([]);
@@ -208,8 +580,9 @@ app.post('/api/parkings/create', async (req, res) => {
     }
     const owner = await User.findById(ownerId);
     const newParking = new Parking({
-      ownerId, location, address, price, timeToLeave, status: 'available', 
-      ownerCar: owner?.car, ownerAvatar: owner?.avatar, extensionsUsed: 0, messages: []
+      ownerId, location, address, price, timeToLeave, status: 'available',
+      ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating,
+      extensionsUsed: 0, messages: []
     });
     await newParking.save();
     res.json({ success: true, message: 'Парковка создана!', parking: newParking });
@@ -247,10 +620,11 @@ app.post('/api/parkings/book', async (req, res) => {
     parking.bookerCar = user.car;
     parking.bookerName = user.name;
     parking.bookerAvatar = user.avatar;
+    parking.bookerRating = user.rating;
     await parking.save();
 
-    const booking = new Booking({ 
-      parkingId: parking._id, userId, ownerId: parking.ownerId, 
+    const booking = new Booking({
+      parkingId: parking._id, userId, ownerId: parking.ownerId,
       address: parking.address, price: parking.price, ownerEarnings, platformFee, status: 'active'
     });
     await booking.save();
@@ -259,9 +633,10 @@ app.post('/api/parkings/book', async (req, res) => {
     await new Transaction({ userId: parking.ownerId, type: 'earning', amount: ownerEarnings, description: `Заработок: ${parking.address}`, bookingId: booking._id }).save();
     await new Transaction({ type: 'commission', amount: platformFee, description: `Комиссия: ${parking.address}`, bookingId: booking._id }).save();
 
-    res.json({ 
-      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: user.balance, 
-      parking: { ...parking.toObject(), ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatar }
+    res.json({
+      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: user.balance,
+      parking: { ...parking.toObject(), ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating },
+      bookingId: booking._id
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
@@ -271,7 +646,7 @@ app.post('/api/parkings/book', async (req, res) => {
 app.get('/api/users/:id/my-parkings', async (req, res) => {
   try {
     const parkings = await Parking.find({ ownerId: req.params.id, status: { $in: ['available', 'booked'] } })
-      .populate('bookedBy', 'name car avatar');
+      .populate('bookedBy', 'name car avatar rating');
     res.json(parkings);
   } catch (error) {
     res.json([]);
@@ -281,19 +656,50 @@ app.get('/api/users/:id/my-parkings', async (req, res) => {
 app.get('/api/users/:id/my-booking', async (req, res) => {
   try {
     const parking = await Parking.findOne({ bookedBy: req.params.id, status: 'booked' })
-      .populate('ownerId', 'name car avatar');
+      .populate('ownerId', 'name car avatar rating');
     if (parking) {
       res.json({
         ...parking.toObject(),
         ownerName: parking.ownerId?.name || 'Владелец',
         ownerCar: parking.ownerId?.car,
-        ownerAvatar: parking.ownerId?.avatar
+        ownerAvatar: parking.ownerId?.avatar,
+        ownerRating: parking.ownerId?.rating
       });
     } else {
       res.json(null);
     }
   } catch (error) {
     res.json(null);
+  }
+});
+
+app.get('/api/users/:id/completed-bookings', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const bookings = await Booking.find({
+      $or: [{ userId }, { ownerId: userId }],
+      status: 'completed'
+    })
+      .populate('userId', 'name avatar rating')
+      .populate('ownerId', 'name avatar rating')
+      .sort({ completedAt: -1 })
+      .limit(20);
+    
+    // Добавляем информацию о том, нужно ли ставить оценку
+    const bookingsWithRatingInfo = bookings.map(b => {
+      const isOwner = b.ownerId._id.toString() === userId;
+      const needsRating = isOwner ? !b.ownerRatedBooker : !b.bookerRatedOwner;
+      return {
+        ...b.toObject(),
+        isOwner,
+        needsRating,
+        otherUser: isOwner ? b.userId : b.ownerId
+      };
+    });
+    
+    res.json(bookingsWithRatingInfo);
+  } catch (error) {
+    res.json([]);
   }
 });
 
@@ -339,7 +745,7 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     const { userId, reason } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
-    
+
     await new Transaction({ userId, type: 'cancellation', amount: 0, description: `Отмена брони: ${parking.address}` }).save();
 
     parking.status = 'available';
@@ -398,8 +804,14 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     parking.confirmedAt = new Date();
     parking.status = 'completed';
     await parking.save();
-    await Booking.findOneAndUpdate({ parkingId: parking._id, status: 'active' }, { status: 'completed', completedAt: new Date() });
-    res.json({ success: true, message: 'Сделка завершена!' });
+    
+    const booking = await Booking.findOneAndUpdate(
+      { parkingId: parking._id, status: 'active' },
+      { status: 'completed', completedAt: new Date() },
+      { new: true }
+    );
+    
+    res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {
     res.status(500).json({ success: false });
   }
@@ -468,7 +880,20 @@ app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (user) {
-      res.json({ id: user._id.toString(), email: user.email, name: user.name, balance: user.balance, car: user.car, avatar: user.avatar, language: user.language || 'ru' });
+      res.json({
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        balance: user.balance,
+        car: user.car,
+        avatar: user.avatar,
+        language: user.language || 'ru',
+        referralCode: user.referralCode,
+        referralCount: user.referralCount,
+        rating: user.rating,
+        ratingCount: user.ratingCount,
+        emailVerified: user.emailVerified
+      });
     } else {
       res.status(404).json({ message: 'Не найден' });
     }
@@ -493,17 +918,8 @@ app.put('/api/users/:id', async (req, res) => {
 });
 
 app.post('/api/users/:id/add-balance', async (req, res) => {
-  try {
-    const { amount, paymentMethod } = req.body;
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ success: false });
-    user.balance += amount;
-    await user.save();
-    await new Transaction({ userId: user._id, type: 'deposit', amount, description: `Пополнение (${paymentMethod || 'карта'})` }).save();
-    res.json({ success: true, newBalance: user.balance });
-  } catch (error) {
-    res.status(500).json({ success: false });
-  }
+  // Временно отключено
+  res.json({ success: false, message: 'Функция пополнения скоро появится!' });
 });
 
 // ==================== ADMIN ====================
@@ -574,40 +990,85 @@ app.get('/api/debug/transactions', async (req, res) => {
   }
 });
 
-// ==================== DEMO DATA ====================
+// ==================== TERMS ====================
 
-async function createDemoData() {
+app.get('/api/terms', (req, res) => {
+  res.json({
+    version: '1.0',
+    lastUpdated: '2026-01-08',
+    content: `
+PARKBRO USER AGREEMENT
+
+1. GENERAL PROVISIONS
+
+1.1. ParkBro is a peer-to-peer (P2P) platform that connects a community of drivers ("Parking Brotherhood") who help each other find parking spots.
+
+1.2. The service is NOT a commercial parking facility and does NOT engage in selling or reselling parking spaces.
+
+1.3. Users voluntarily share information about their plans to vacate a parking spot, helping other community members.
+
+2. COMMUNITY PRINCIPLES
+
+2.1. The Parking Brotherhood is based on mutual assistance and voluntary participation.
+
+2.2. Points in the system are an internal gratitude currency and have NO monetary equivalent.
+
+2.3. Members help each other solely out of a desire to make parking easier and faster for the entire community.
+
+3. LIABILITY
+
+3.1. ParkBro is an information platform and is not responsible for:
+- Availability of specific parking spots
+- Actions or inactions of other users
+- Accuracy of information provided by users
+
+3.2. Users make their own decisions about using information from the service.
+
+4. TERMS OF USE
+
+4.1. It is prohibited to use the service for commercial resale of parking spaces.
+
+4.2. Users agree to provide accurate information.
+
+4.3. Abuse of the system may result in account suspension.
+
+5. CONTACT
+
+For all inquiries: c110ko30rus@gmail.com
+
+© 2026 ParkBro. All rights reserved.
+    `
+  });
+});
+
+// ==================== ADMIN SETUP ====================
+
+async function createAdminIfNeeded() {
   try {
-    let admin = await User.findOne({ email: 'admin@test.com' });
+    let admin = await User.findOne({ email: 'admin@parkbro.com' });
     if (!admin) {
-      admin = new User({ email: 'admin@test.com', password: 'admin123', name: 'Администратор', balance: 1000, isAdmin: true, language: 'ru' });
+      admin = new User({
+        email: 'admin@parkbro.com',
+        password: 'admin123',
+        name: 'Администратор',
+        balance: 1000,
+        isAdmin: true,
+        language: 'ru',
+        referralCode: generateReferralCode(),
+        emailVerified: true,
+        acceptedTerms: true
+      });
       await admin.save();
-      await new Transaction({ userId: admin._id, type: 'bonus', amount: 1000, description: 'Начальный баланс' }).save();
+      console.log('👑 Админ создан: admin@parkbro.com / admin123');
     }
-
-    let user1 = await User.findOne({ email: 'demo@test.com' });
-    if (!user1) {
-      user1 = new User({ email: 'demo@test.com', password: '123456', name: 'Алексей', balance: 150, car: { brand: 'Toyota', model: 'Camry', color: 'Белый', plate: 'A123BC', size: 'L' }, language: 'ru' });
-      await user1.save();
-      await new Transaction({ userId: user1._id, type: 'bonus', amount: 50, description: 'Бонус за регистрацию' }).save();
-      await new Transaction({ userId: user1._id, type: 'deposit', amount: 100, description: 'Пополнение' }).save();
-    }
-    
-    let user2 = await User.findOne({ email: 'test@test.com' });
-    if (!user2) {
-      user2 = new User({ email: 'test@test.com', password: '123456', name: 'Иван', balance: 100, car: { brand: 'BMW', model: 'X5', color: 'Чёрный', plate: 'B456CD', size: 'XL' }, language: 'ru' });
-      await user2.save();
-      await new Transaction({ userId: user2._id, type: 'bonus', amount: 50, description: 'Бонус за регистрацию' }).save();
-    }
-
-    console.log('✅ Demo data ready');
+    console.log('✅ Сервер готов');
   } catch (error) {
-    console.error('Demo error:', error);
+    console.error('Admin setup error:', error);
   }
 }
 
 // ==================== START ====================
 
 app.listen(PORT, () => {
-  console.log(`🚗 ParkEasy API running on port ${PORT}`);
+  console.log(`🚗 ParkBro API running on port ${PORT}`);
 });

@@ -970,6 +970,16 @@ app.get("/api/admin/export-users", async (req, res) => {
   }
 });
 
+app.get("/api/admin/parkings", async (req, res) => {
+  try {
+    const parkings = await Parking.find({}).populate("ownerId", "name email").sort({ createdAt: -1 });
+    res.json(parkings);
+  } catch (error) {
+    res.status(500).json([]);
+  }
+});
+
+
 app.put('/api/admin/parkings/:id', async (req, res) => {
   try {
     const parking = await Parking.findByIdAndUpdate(req.params.id, req.body, { new: true });

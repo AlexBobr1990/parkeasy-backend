@@ -896,86 +896,26 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
   }
 });
 
-app.post('/api/parkings/:id/wait-response', async (req, res) => {
+app.post("/api/parkings/:id/wait-response", async (req, res) => {
   try {
     const { accepted } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
-    if (accepted && parking.waitRequest) parking.timeToLeave += parking.waitRequest.minutes;
+    
+    if (accepted && parking.waitRequest) {
+      parking.timeToLeave += parking.waitRequest.minutes;
+    }
+    
+    // Save response for owner to see
+    parking.waitResponse = { accepted, respondedAt: new Date() };
     parking.waitRequest = null;
     await parking.save();
+    
     res.json({ success: true, accepted });
   } catch (error) {
     res.status(500).json({ success: false });
   }
 });
-
-// ==================== USER ====================
-
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    if (user) {
-      // Generate referral code if missing
-      if (!user.referralCode) {
-        user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
-        await user.save();
-      }
-      res.json({
-        id: user._id.toString(),
-        email: user.email,
-        name: user.name,
-        balance: user.balance,
-        car: user.car,
-        avatar: user.avatar,
-        language: user.language || 'ru',
-        referralCode: user.referralCode,
-        referralCount: user.referralCount,
-        rating: user.rating,
-        ratingCount: user.ratingCount,
-        emailVerified: user.emailVerified
-      });
-    } else {
-      res.status(404).json({ message: 'Не найден' });
-    }
-  } catch (error) {
-    res.status(500).json({ message: 'Ошибка' });
-  }
-});
-
-app.put('/api/users/:id', async (req, res) => {
-  try {
-    const { car, avatar, language, name } = req.body;
-    const updateData = {};
-    if (car) updateData.car = car;
-    if (avatar !== undefined) updateData.avatar = avatar;
-    if (language) updateData.language = language;
-    if (name) updateData.name = name;
-    const user = await User.findByIdAndUpdate(req.params.id, updateData, { new: true });
-    res.json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ success: false });
-  }
-});
-
-app.post('/api/users/:id/add-balance', async (req, res) => {
-  // Временно отключено
-  res.json({ success: false, message: 'Функция пополнения скоро появится!' });
-});
-
-// ==================== ADMIN ====================
-
-app.get('/api/admin/parkings', async (req, res) => {
-  try {
-    const parkings = await Parking.find({}).populate('ownerId', 'name email').populate('bookedBy', 'name email').sort({ createdAt: -1 });
-    res.json(parkings);
-  } catch (error) {
-    res.status(500).json([]);
-  }
-});
-
-// Export all users for admin
-// Delete all users except admin
 app.post("/api/admin/clear-users", async (req, res) => {
   try {
     const result = await User.deleteMany({ email: { $ne: "admin@test.com" } });

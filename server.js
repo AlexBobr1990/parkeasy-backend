@@ -89,6 +89,10 @@ const parkingSchema = new mongoose.Schema({
     fromUserId: mongoose.Schema.Types.ObjectId,
     createdAt: Date
   },
+  waitResponse: {
+    accepted: Boolean,
+    respondedAt: Date
+  },
   createdAt: { type: Date, default: Date.now }
 });
 

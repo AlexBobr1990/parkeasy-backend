@@ -352,6 +352,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
+});
 
 // Forgot password - send reset code
 app.post("/api/auth/forgot-password", async (req, res) => {
@@ -411,7 +412,6 @@ app.post("/api/auth/reset-password", async (req, res) => {
     console.log("Reset password error:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
-});
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -982,6 +982,7 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     res.status(500).json({ success: false });
   }
 });
+
 app.post("/api/admin/clear-users", async (req, res) => {
   try {
     const result = await User.deleteMany({ email: { $ne: "admin@test.com" } });

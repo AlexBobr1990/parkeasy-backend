@@ -32,6 +32,8 @@ const userSchema = new mongoose.Schema({
   emailVerified: { type: Boolean, default: false },
   verificationCode: String,
   verificationExpires: Date,
+  resetCode: String,
+  resetCodeExpires: Date,
   
   // OAuth
   googleId: String,
@@ -350,6 +352,66 @@ app.post('/api/auth/resend-verification', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
+
+// Forgot password - send reset code
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    
+    const resetCode = generateVerificationCode();
+    user.resetCode = resetCode;
+    user.resetCodeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await user.save();
+    
+    await sgMail.send({
+      to: email,
+      from: "noreply@park-bro.com",
+      subject: "ParkBro - Password Reset Code",
+      text: `Your password reset code is: ${resetCode}. Valid for 10 minutes.`,
+      html: `<h2>Password Reset</h2><p>Your code: <strong>${resetCode}</strong></p><p>Valid for 10 minutes.</p>`
+    });
+    
+    res.json({ success: true, message: "Reset code sent" });
+  } catch (error) {
+    console.log("Forgot password error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Reset password with code
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    
+    if (user.resetCode !== code) {
+      return res.status(400).json({ success: false, message: "Invalid code" });
+    }
+    
+    if (new Date() > user.resetCodeExpires) {
+      return res.status(400).json({ success: false, message: "Code expired" });
+    }
+    
+    user.password = newPassword;
+    user.resetCode = null;
+    user.resetCodeExpires = null;
+    await user.save();
+    
+    res.json({ success: true, message: "Password updated" });
+  } catch (error) {
+    console.log("Reset password error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 });
 
 app.post('/api/auth/login', async (req, res) => {

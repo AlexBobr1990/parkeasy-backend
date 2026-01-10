@@ -156,7 +156,7 @@ const sendVerificationEmail = async (email, code) => {
   try {
     await sgMail.send({
       to: email,
-      from: "c110ko30rus@gmail.com",
+      from: "noreply@park-bro.com",
       subject: "ParkBro - Verification Code",
       text: `Your verification code is: ${code}`,
       html: `<div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto; padding: 20px;"><h2 style="color: #4a5568; text-align: center;">🚗 ParkBro</h2><p style="text-align: center; color: #666;">Your verification code:</p><div style="background: #f0f4f8; border-radius: 10px; padding: 20px; text-align: center; margin: 20px 0;"><span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #4a5568;">${code}</span></div><p style="text-align: center; color: #999; font-size: 12px;">This code expires in 10 minutes.</p></div>`

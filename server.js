@@ -333,6 +333,11 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase(), password });
     
     if (user) {
+      // Generate referral code if missing
+      if (!user.referralCode) {
+        user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+        await user.save();
+      }
       res.json({
         success: true,
         user: {
@@ -365,6 +370,11 @@ app.post('/api/auth/google', async (req, res) => {
     let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
     
     if (user) {
+      // Generate referral code if missing
+      if (!user.referralCode) {
+        user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+        await user.save();
+      }
       // Обновляем googleId если пользователь существует
       if (!user.googleId) {
         user.googleId = googleId;
@@ -424,6 +434,11 @@ app.post('/api/auth/apple', async (req, res) => {
     let user = await User.findOne({ $or: [{ appleId }, { email: email?.toLowerCase() }] });
     
     if (user) {
+      // Generate referral code if missing
+      if (!user.referralCode) {
+        user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+        await user.save();
+      }
       if (!user.appleId) {
         user.appleId = appleId;
         user.authProvider = 'apple';
@@ -880,6 +895,11 @@ app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (user) {
+      // Generate referral code if missing
+      if (!user.referralCode) {
+        user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+        await user.save();
+      }
       res.json({
         id: user._id.toString(),
         email: user.email,

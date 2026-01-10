@@ -972,7 +972,7 @@ app.get("/api/admin/export-users", async (req, res) => {
 
 app.get("/api/admin/parkings", async (req, res) => {
   try {
-    const parkings = await Parking.find({}).populate("ownerId", "name email").sort({ createdAt: -1 });
+    const parkings = await Parking.find({}).populate("ownerId", "name email").populate("bookedBy", "name email").sort({ createdAt: -1 });
     res.json(parkings);
   } catch (error) {
     res.status(500).json([]);

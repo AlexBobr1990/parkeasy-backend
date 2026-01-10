@@ -1,4 +1,6 @@
 const express = require('express');
+const sgMail = require("@sendgrid/mail");
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
@@ -149,6 +151,33 @@ function generateVerificationCode() {
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB подключена!');
+
+// Send verification email
+const sendVerificationEmail = async (email, code) => {
+  try {
+    await sgMail.send({
+      to: email,
+      from: "noreply@parkbro.app",
+      subject: "ParkBro - Verification Code",
+      text: `Your verification code is: ${code}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #4a5568; text-align: center;">🚗 ParkBro</h2>
+          <p style="text-align: center; color: #666;">Your verification code:</p>
+          <div style="background: #f0f4f8; border-radius: 10px; padding: 20px; text-align: center; margin: 20px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #4a5568;">${code}</span>
+          </div>
+          <p style="text-align: center; color: #999; font-size: 12px;">This code expires in 10 minutes.</p>
+        </div>
+      `
+    });
+    console.log(`📧 Email sent to ${email}`);
+    return true;
+  } catch (error) {
+    console.error("Email error:", error);
+    return false;
+  }
+};
     createAdminIfNeeded();
   })
   .catch(err => console.error('❌ Ошибка MongoDB:', err));
@@ -244,7 +273,7 @@ app.post('/api/auth/register', async (req, res) => {
     }).save();
     
     // TODO: Отправить email с кодом верификации
-    console.log(`📧 Код верификации для ${lowerEmail}: ${verificationCode}`);
+    await sendVerificationEmail(lowerEmail, verificationCode);
     
     res.json({
       success: true,
@@ -319,7 +348,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
     await user.save();
     
     // TODO: Отправить email
-    console.log(`📧 Новый код верификации для ${email}: ${verificationCode}`);
+    await sendVerificationEmail(email, verificationCode);
     
     res.json({ success: true, message: 'Код отправлен повторно' });
   } catch (error) {

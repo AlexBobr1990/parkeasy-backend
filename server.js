@@ -157,7 +157,7 @@ const sendVerificationEmail = async (email, code) => {
   try {
     await sgMail.send({
       to: email,
-      from: "noreply@parkbro.app",
+      from: "c110ko30rus@gmail.com",
       subject: "ParkBro - Verification Code",
       text: `Your verification code is: ${code}`,
       html: `
@@ -979,6 +979,46 @@ app.get('/api/admin/parkings', async (req, res) => {
     res.json(parkings);
   } catch (error) {
     res.status(500).json([]);
+  }
+});
+
+// Export all users for admin
+app.get("/api/admin/export-users", async (req, res) => {
+  try {
+    const users = await User.find({}).select("-__v").lean();
+    const transactions = await Transaction.find({}).lean();
+    
+    const exportData = users.map(user => {
+      const userTransactions = transactions.filter(t => 
+        t.userId && t.userId.toString() === user._id.toString()
+      );
+      const totalEarned = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+      const totalSpent = userTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+      
+      return {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        password: user.password,
+        balance: user.balance,
+        rating: user.rating || 5,
+        ratingCount: user.ratingCount || 0,
+        referralCode: user.referralCode,
+        referredBy: user.referredBy,
+        emailVerified: user.emailVerified,
+        isAdmin: user.isAdmin,
+        car: user.car,
+        createdAt: user.createdAt,
+        totalEarned,
+        totalSpent,
+        transactionCount: userTransactions.length,
+        transactions: userTransactions.slice(0, 50)
+      };
+    });
+    
+    res.json(exportData);
+  } catch (error) {
+    res.status(500).json({ error: "Export failed" });
   }
 });
 

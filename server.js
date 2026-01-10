@@ -976,7 +976,7 @@ app.get('/api/admin/parkings', async (req, res) => {
 
 // Export all users for admin
 // Delete all users except admin
-app.delete("/api/admin/clear-users", async (req, res) => {
+app.post("/api/admin/clear-users", async (req, res) => {
   try {
     const result = await User.deleteMany({ email: { $ne: "admin@test.com" } });
     await Transaction.deleteMany({ userId: { $ne: null } });

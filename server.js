@@ -711,9 +711,11 @@ app.post('/api/parkings/book', async (req, res) => {
     const ownerEarnings = parking.price - platformFee;
 
     const owner = await User.findById(parking.ownerId);
+    console.log("Owner found:", owner?._id, "Current balance:", owner?.balance, "Will add:", ownerEarnings);
     if (owner) {
       owner.balance += ownerEarnings;
       await owner.save();
+      console.log("Owner new balance after save:", owner.balance);
     }
 
     parking.status = 'booked';

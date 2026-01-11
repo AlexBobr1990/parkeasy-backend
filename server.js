@@ -737,7 +737,8 @@ app.post('/api/parkings/book', async (req, res) => {
 
     res.json({
       success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: user.balance,
-      parking: { ...parking.toObject(), ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating },
+      parking: { ...parking.toObject(),
+        bookingId: booking?._id, ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating },
       bookingId: booking._id
     });
   } catch (error) {
@@ -760,8 +761,10 @@ app.get('/api/users/:id/my-booking', async (req, res) => {
     const parking = await Parking.findOne({ bookedBy: req.params.id, status: 'booked' })
       .populate('ownerId', 'name car avatar rating');
     if (parking) {
+      const booking = await Booking.findOne({ parkingId: parking._id, status: "active" });
       res.json({
         ...parking.toObject(),
+        bookingId: booking?._id,
         ownerName: parking.ownerId?.name || 'Владелец',
         ownerCar: parking.ownerId?.car,
         ownerAvatar: parking.ownerId?.avatar,

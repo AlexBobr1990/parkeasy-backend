@@ -1075,6 +1075,20 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
+app.post("/api/admin/add-points", async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    user.balance += amount;
+    await user.save();
+    await new Transaction({ userId, type: "bonus", amount, description: "Админ начисление" }).save();
+    res.json({ success: true, newBalance: user.balance });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
 app.get('/api/admin/commissions', async (req, res) => {
   try {
     const commissions = await Transaction.find({ type: 'commission' }).sort({ createdAt: -1 });

@@ -166,6 +166,7 @@ const sendVerificationEmail = async (email, code) => {
     console.log(`📧 Email sent to ${email}`);
     return true;
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error("Email error:", error);
     return false;
   }
@@ -192,7 +193,8 @@ setInterval(async () => {
       { status: 'available', timeToLeave: { $lte: 0 } },
       { status: 'expired' }
     );
-  } catch (error) {}
+  } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);}
 }, 60000);
 
 // ==================== ROUTES ====================
@@ -290,6 +292,7 @@ app.post('/api/auth/register', async (req, res) => {
       verificationRequired: true
     });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error('Register error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
@@ -323,6 +326,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
     
     res.json({ success: true, message: 'Email подтверждён!' });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -350,6 +354,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
     
     res.json({ success: true, message: 'Код отправлен повторно' });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -379,6 +384,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     
     res.json({ success: true, message: "Reset code sent" });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.log("Forgot password error:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
@@ -409,6 +415,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     
     res.json({ success: true, message: "Password updated" });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.log("Reset password error:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
@@ -446,6 +453,7 @@ app.post('/api/auth/login', async (req, res) => {
       res.status(401).json({ success: false, message: 'Неверный email или пароль' });
     }
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -509,6 +517,7 @@ app.post('/api/auth/google', async (req, res) => {
       }
     });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error('Google auth error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
@@ -570,6 +579,7 @@ app.post('/api/auth/apple', async (req, res) => {
       }
     });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error('Apple auth error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
@@ -631,6 +641,7 @@ app.post('/api/ratings', async (req, res) => {
     
     res.json({ success: true, message: 'Оценка сохранена' });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error('Rating error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
@@ -642,6 +653,7 @@ app.get('/api/users/:id', async (req, res) => {
     if (!user) return res.status(404).json(null);
     res.json(user);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json(null);
   }
 });
@@ -654,6 +666,7 @@ app.get('/api/users/:id/ratings', async (req, res) => {
       .limit(20);
     res.json(ratings);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json([]);
   }
 });
@@ -667,6 +680,7 @@ app.get('/api/users/:id/history', async (req, res) => {
     const transactions = await Transaction.find({ userId }).sort({ createdAt: -1 }).limit(50);
     res.json(transactions);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json([]);
   }
 });
@@ -679,6 +693,7 @@ app.get('/api/parkings/nearby', async (req, res) => {
       .populate('ownerId', 'name car avatar rating ratingCount');
     res.json(parkings);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json([]);
   }
 });
@@ -699,6 +714,7 @@ app.post('/api/parkings/create', async (req, res) => {
     await newParking.save();
     res.json({ success: true, message: 'Парковка создана!', parking: newParking });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -762,6 +778,7 @@ app.post('/api/parkings/book', async (req, res) => {
       bookingId: booking._id
     });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -772,6 +789,7 @@ app.get('/api/users/:id/my-parkings', async (req, res) => {
       .populate('bookedBy', 'name car avatar rating');
     res.json(parkings);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json([]);
   }
 });
@@ -794,6 +812,7 @@ app.get('/api/users/:id/my-booking', async (req, res) => {
       res.json(null);
     }
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json(null);
   }
 });
@@ -824,6 +843,7 @@ app.get('/api/users/:id/completed-bookings', async (req, res) => {
     
     res.json(bookingsWithRatingInfo);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json([]);
   }
 });
@@ -839,6 +859,7 @@ app.post('/api/parkings/:id/extend', async (req, res) => {
     await parking.save();
     res.json({ success: true, parking });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -848,6 +869,7 @@ app.put('/api/parkings/:id/comment', async (req, res) => {
     await Parking.findByIdAndUpdate(req.params.id, { comment: req.body.comment });
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -861,6 +883,7 @@ app.delete('/api/parkings/:id', async (req, res) => {
     await parking.save();
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -883,6 +906,7 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     await parking.save();
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -897,6 +921,7 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
     await parking.save();
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -906,6 +931,7 @@ app.post('/api/parkings/:id/update-location', async (req, res) => {
     await Parking.findByIdAndUpdate(req.params.id, { bookerLocation: req.body.location });
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -918,6 +944,7 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
     await parking.save();
     res.json({ success: true, parking });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -938,6 +965,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -949,6 +977,7 @@ app.get('/api/parkings/:id/messages', async (req, res) => {
     const parking = await Parking.findById(req.params.id);
     res.json(parking?.messages || []);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.json([]);
   }
 });
@@ -968,6 +997,7 @@ app.post('/api/parkings/:id/messages', async (req, res) => {
     await parking.save();
     res.json({ success: true, messages: parking.messages });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -981,6 +1011,7 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
     await parking.save();
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -1002,6 +1033,7 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     
     res.json({ success: true, accepted });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -1012,6 +1044,7 @@ app.post("/api/admin/clear-users", async (req, res) => {
     await Transaction.deleteMany({ userId: { $ne: null } });
     res.json({ success: true, deleted: result.deletedCount });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1052,6 +1085,7 @@ app.get("/api/admin/export-users", async (req, res) => {
     
     res.json(exportData);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ error: "Export failed" });
   }
 });
@@ -1061,6 +1095,7 @@ app.get("/api/admin/parkings", async (req, res) => {
     const parkings = await Parking.find({}).populate("ownerId", "name email").populate("bookedBy", "name email").sort({ createdAt: -1 });
     res.json(parkings);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json([]);
   }
 });
@@ -1071,6 +1106,7 @@ app.put('/api/admin/parkings/:id', async (req, res) => {
     const parking = await Parking.findByIdAndUpdate(req.params.id, req.body, { new: true });
     res.json({ success: true, parking });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -1080,6 +1116,7 @@ app.delete('/api/admin/parkings/:id', async (req, res) => {
     await Parking.findByIdAndDelete(req.params.id);
     res.json({ success: true });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -1089,6 +1126,7 @@ app.get('/api/admin/users', async (req, res) => {
     const users = await User.find({}).sort({ createdAt: -1 });
     res.json(users);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json([]);
   }
 });
@@ -1103,6 +1141,7 @@ app.post("/api/admin/add-points", async (req, res) => {
     await new Transaction({ userId, type: "bonus", amount, description: "Админ начисление" }).save();
     res.json({ success: true, newBalance: user.balance });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -1113,6 +1152,7 @@ app.get('/api/admin/commissions', async (req, res) => {
     const total = commissions.reduce((sum, t) => sum + t.amount, 0);
     res.json({ total, count: commissions.length, transactions: commissions });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ total: 0, count: 0, transactions: [] });
   }
 });
@@ -1122,6 +1162,7 @@ app.get('/api/admin/transactions', async (req, res) => {
     const transactions = await Transaction.find({}).populate('userId', 'name email').sort({ createdAt: -1 }).limit(100);
     res.json(transactions);
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json([]);
   }
 });
@@ -1133,6 +1174,7 @@ app.get('/api/debug/transactions', async (req, res) => {
     const all = await Transaction.find({}).sort({ createdAt: -1 }).limit(20);
     res.json({ count: all.length, transactions: all });
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1210,6 +1252,7 @@ async function createAdminIfNeeded() {
     }
     console.log('✅ Сервер готов');
   } catch (error) {
+    console.log("CREATE PARKING ERROR:", error);
     console.error('Admin setup error:', error);
   }
 }

@@ -636,6 +636,16 @@ app.post('/api/ratings', async (req, res) => {
   }
 });
 
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json(null);
+    res.json(user);
+  } catch (error) {
+    res.status(500).json(null);
+  }
+});
+
 app.get('/api/users/:id/ratings', async (req, res) => {
   try {
     const ratings = await Rating.find({ toUserId: req.params.id })

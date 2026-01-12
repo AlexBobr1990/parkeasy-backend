@@ -711,11 +711,19 @@ app.post('/api/parkings/book', async (req, res) => {
     const ownerEarnings = parking.price - platformFee;
 
     const owner = await User.findById(parking.ownerId);
-    console.log("Owner found:", owner?._id, "Current balance:", owner?.balance, "Will add:", ownerEarnings);
+    console.log("=== BOOKING PAYMENT ===");
+    console.log("Parking ID:", parkingId);
+    console.log("Owner ID:", parking.ownerId);
+    console.log("Owner found:", !!owner);
     if (owner) {
-      owner.balance += ownerEarnings;
-      await owner.save();
-      console.log("Owner new balance after save:", owner.balance);
+      console.log("Owner name:", owner.name);
+      console.log("Owner balance BEFORE:", owner.balance);
+      console.log("Will add ownerEarnings:", ownerEarnings);
+      owner.balance = (owner.balance || 0) + ownerEarnings;
+      const savedOwner = await owner.save();
+      console.log("Owner balance AFTER save:", savedOwner.balance);
+    } else {
+      console.log("ERROR: Owner not found for parking.ownerId:", parking.ownerId);
     }
 
     parking.status = 'booked';

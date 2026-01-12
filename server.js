@@ -133,6 +133,7 @@ const ratingSchema = new mongoose.Schema({
   rating: { type: Number, required: true, min: 1, max: 5 },
   problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'other'] }],
   comment: String,
+  fromRole: String,
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -614,6 +615,7 @@ app.post('/api/ratings', async (req, res) => {
     
     // Создаём рейтинг
     const newRating = new Rating({
+      fromRole: isOwner ? "owner" : "driver",
       fromUserId,
       toUserId,
       bookingId,

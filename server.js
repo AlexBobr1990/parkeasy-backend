@@ -598,6 +598,7 @@ app.post('/api/ratings', async (req, res) => {
     }
     
     // Проверяем что пользователь участвовал в бронировании
+    console.log("RATING DEBUG:", { fromUserId, bookingOwnerId: booking.ownerId.toString(), bookingUserId: booking.userId.toString() });
     const isOwner = booking.ownerId.toString() === fromUserId;
     const isBooker = booking.userId.toString() === fromUserId;
     

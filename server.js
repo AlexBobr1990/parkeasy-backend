@@ -700,6 +700,7 @@ app.get('/api/parkings/nearby', async (req, res) => {
 
 app.post('/api/parkings/create', async (req, res) => {
   try {
+    console.log("CREATE REQ BODY:", req.body);
     const { ownerId, location, address, price, timeToLeave } = req.body;
     const existing = await Parking.findOne({ ownerId, status: { $in: ['available', 'booked'] } });
     if (existing) {

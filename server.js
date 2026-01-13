@@ -661,6 +661,21 @@ app.get('/api/users/:id', async (req, res) => {
   }
 });
 
+
+app.put("/api/users/:id", async (req, res) => {
+  try {
+    const { car, avatar, language } = req.body;
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    if (car) user.car = car;
+    if (avatar) user.avatar = avatar;
+    if (language) user.language = language;
+    await user.save();
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 app.get('/api/users/:id/ratings', async (req, res) => {
   try {
     const ratings = await Rating.find({ toUserId: req.params.id })

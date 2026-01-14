@@ -54,6 +54,7 @@ const userSchema = new mongoose.Schema({
   acceptedTerms: { type: Boolean, default: false },
   acceptedTermsAt: Date,
   
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -96,6 +97,7 @@ const parkingSchema = new mongoose.Schema({
     accepted: Boolean,
     respondedAt: Date
   },
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -114,6 +116,7 @@ const bookingSchema = new mongoose.Schema({
   bookerRatedOwner: { type: Boolean, default: false },
   
   completedAt: Date,
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -124,6 +127,7 @@ const transactionSchema = new mongoose.Schema({
   description: { type: String, required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
   metadata: mongoose.Schema.Types.Mixed,
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -135,6 +139,7 @@ const ratingSchema = new mongoose.Schema({
   problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'other'] }],
   comment: String,
   fromRole: String,
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -156,6 +161,7 @@ const helpRequestSchema = new mongoose.Schema({
   reward: { type: Number, default: 10 },
   status: { type: String, default: 'active' },
   helperId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now },
   expiresAt: { type: Date }
 });
@@ -802,6 +808,18 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
+  }
+});
+
+app.get('/api/stats', async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const fiveMinAgo = new Date(Date.now() - 5 * 60000);
+    const onlineUsers = await User.countDocuments({ lastActivity: { $gte: fiveMinAgo } });
+    const activeSpots = await Parking.countDocuments({ status: 'available' });
+    res.json({ totalUsers, onlineUsers, activeSpots });
+  } catch (error) {
+    res.json({ totalUsers: 0, onlineUsers: 0, activeSpots: 0 });
   }
 });
 app.get('/api/parkings/nearby', async (req, res) => {

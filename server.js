@@ -55,6 +55,7 @@ const userSchema = new mongoose.Schema({
   acceptedTermsAt: Date,
   
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -98,6 +99,7 @@ const parkingSchema = new mongoose.Schema({
     respondedAt: Date
   },
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -117,6 +119,7 @@ const bookingSchema = new mongoose.Schema({
   
   completedAt: Date,
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -128,6 +131,7 @@ const transactionSchema = new mongoose.Schema({
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
   metadata: mongoose.Schema.Types.Mixed,
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -140,6 +144,7 @@ const ratingSchema = new mongoose.Schema({
   comment: String,
   fromRole: String,
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -164,6 +169,7 @@ const helpRequestSchema = new mongoose.Schema({
   helperLocation: { lat: Number, lng: Number },
   helperArrived: { type: Boolean, default: false },
   lastActivity: { type: Date, default: Date.now },
+  lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now },
   expiresAt: { type: Date }
 });
@@ -694,10 +700,21 @@ app.put("/api/users/:id", async (req, res) => {
     if (car) user.car = car;
     if (avatar) user.avatar = avatar;
     if (language) user.language = language;
+    if (req.body.lastLocation) user.lastLocation = req.body.lastLocation;
     await user.save();
     res.json({ success: true, user });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.post('/api/users/:id/update-location', async (req, res) => {
+  try {
+    const { location } = req.body;
+    await User.findByIdAndUpdate(req.params.id, { lastLocation: location, lastActivity: new Date() });
+    res.json({ success: true });
+  } catch (error) {
+    res.json({ success: false });
   }
 });
 app.get('/api/users/:id/ratings', async (req, res) => {
@@ -859,15 +876,27 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
   }
 });
 
+
 app.get('/api/stats', async (req, res) => {
   try {
+    const { lat, lng } = req.query;
     const totalUsers = await User.countDocuments();
-    const fiveMinAgo = new Date(Date.now() - 5 * 60000);
-    const onlineUsers = await User.countDocuments({ lastActivity: { $gte: fiveMinAgo } });
-    const activeSpots = await Parking.countDocuments({ status: 'available' });
-    res.json({ totalUsers, onlineUsers, activeSpots });
+    
+    let nearbyUsers = 0;
+    if (lat && lng) {
+      const users = await User.find({ lastLocation: { $exists: true } });
+      const userLat = parseFloat(lat);
+      const userLng = parseFloat(lng);
+      nearbyUsers = users.filter(u => {
+        if (!u.lastLocation) return false;
+        const dist = Math.sqrt(Math.pow(u.lastLocation.lat - userLat, 2) + Math.pow(u.lastLocation.lng - userLng, 2));
+        return dist < 0.05;
+      }).length;
+    }
+    
+    res.json({ totalUsers, nearbyUsers });
   } catch (error) {
-    res.json({ totalUsers: 0, onlineUsers: 0, activeSpots: 0 });
+    res.json({ totalUsers: 0, nearbyUsers: 0 });
   }
 });
 app.get('/api/parkings/nearby', async (req, res) => {

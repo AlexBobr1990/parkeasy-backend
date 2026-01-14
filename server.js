@@ -884,7 +884,8 @@ app.get('/api/stats', async (req, res) => {
     
     let nearbyUsers = 0;
     if (lat && lng) {
-      const users = await User.find({ lastLocation: { $exists: true } });
+      const fiveMinAgo = new Date(Date.now() - 5 * 60000);
+      const users = await User.find({ lastLocation: { $exists: true }, lastActivity: { $gte: fiveMinAgo } });
       const userLat = parseFloat(lat);
       const userLng = parseFloat(lng);
       nearbyUsers = users.filter(u => {

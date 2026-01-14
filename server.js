@@ -734,8 +734,8 @@ app.get('/api/users/:id/history', async (req, res) => {
 
 app.get('/api/help-requests', async (req, res) => {
   try {
-    const requests = await HelpRequest.find({ status: 'active', expiresAt: { $gt: new Date() } })
-      .populate('userId', 'name car avatar rating');
+    const requests = await HelpRequest.find({ status: { $in: ['active', 'accepted'] }, expiresAt: { $gt: new Date() } })
+      .populate('userId', 'name car avatar rating').populate('helperId', 'name car avatar rating');
     res.json(requests);
   } catch (error) {
     res.status(500).json([]);
@@ -803,7 +803,7 @@ app.get('/api/users/:id/my-help-request', async (req, res) => {
       .populate('helperId', 'name car avatar rating');
     if (!request) {
       request = await HelpRequest.findOne({ helperId: userId, status: 'accepted' })
-        .populate('userId', 'name car avatar rating');
+        .populate('userId', 'name car avatar rating').populate('helperId', 'name car avatar rating');
     }
     res.json(request);
   } catch (error) {

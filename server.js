@@ -806,11 +806,11 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
 });
 app.get('/api/parkings/nearby', async (req, res) => {
   try {
-    const parkings = await Parking.find({ status: 'available', expiresAt: { $gt: new Date() } })
+    const parkings = await Parking.find({ status: 'available', $or: [{ expiresAt: { $gt: new Date() } }, { expiresAt: { $exists: false }, timeToLeave: { $gt: 0 } }] })
       .populate('ownerId', 'name car avatar rating ratingCount');
     const result = parkings.map(p => ({
       ...p.toObject(),
-      timeToLeave: Math.max(0, Math.round((new Date(p.expiresAt) - new Date()) / 60000))
+      timeToLeave: p.expiresAt ? Math.max(0, Math.round((new Date(p.expiresAt) - new Date()) / 60000)) : p.timeToLeave
     }));
     res.json(result);
   } catch (error) {

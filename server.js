@@ -161,6 +161,8 @@ const helpRequestSchema = new mongoose.Schema({
   reward: { type: Number, default: 10 },
   status: { type: String, default: 'active' },
   helperId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  helperLocation: { lat: Number, lng: Number },
+  helperArrived: { type: Boolean, default: false },
   lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now },
   expiresAt: { type: Date }
@@ -766,6 +768,46 @@ app.post('/api/help-requests/:id/accept', async (req, res) => {
     res.json({ success: true, request });
   } catch (error) {
     res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/help-requests/:id/update-helper-location', async (req, res) => {
+  try {
+    const { location } = req.body;
+    const request = await HelpRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ success: false });
+    request.helperLocation = location;
+    await request.save();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
+  try {
+    const request = await HelpRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ success: false });
+    request.helperArrived = true;
+    await request.save();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.get('/api/users/:id/my-help-request', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    let request = await HelpRequest.findOne({ userId, status: { $in: ['active', 'accepted'] } })
+      .populate('helperId', 'name car avatar rating');
+    if (!request) {
+      request = await HelpRequest.findOne({ helperId: userId, status: 'accepted' })
+        .populate('userId', 'name car avatar rating');
+    }
+    res.json(request);
+  } catch (error) {
+    res.json(null);
   }
 });
 

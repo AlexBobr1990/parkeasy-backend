@@ -144,6 +144,23 @@ const Booking = mongoose.model('Booking', bookingSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 const Rating = mongoose.model('Rating', ratingSchema);
 
+const helpRequestSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  location: {
+    lat: { type: Number, required: true },
+    lng: { type: Number, required: true }
+  },
+  address: String,
+  problemType: { type: String, required: true },
+  description: String,
+  reward: { type: Number, default: 10 },
+  status: { type: String, default: 'active' },
+  helperId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date }
+});
+const HelpRequest = mongoose.model('HelpRequest', helpRequestSchema);
+
 // ==================== HELPERS ====================
 
 function generateReferralCode() {
@@ -704,6 +721,89 @@ app.get('/api/users/:id/history', async (req, res) => {
 
 // ==================== PARKINGS ====================
 
+
+// ==================== HELP REQUESTS ====================
+
+app.get('/api/help-requests', async (req, res) => {
+  try {
+    const requests = await HelpRequest.find({ status: 'active', expiresAt: { $gt: new Date() } })
+      .populate('userId', 'name car avatar rating');
+    res.json(requests);
+  } catch (error) {
+    res.status(500).json([]);
+  }
+});
+
+app.post('/api/help-requests/create', async (req, res) => {
+  try {
+    const { userId, location, address, problemType, description, reward } = req.body;
+    const helpRequest = new HelpRequest({
+      userId, location, address, problemType, description,
+      reward: reward || 10,
+      expiresAt: new Date(Date.now() + 60 * 60000)
+    });
+    await helpRequest.save();
+    res.json({ success: true, helpRequest });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/help-requests/:id/accept', async (req, res) => {
+  try {
+    const { helperId } = req.body;
+    const request = await HelpRequest.findById(req.params.id);
+    if (!request || request.status !== 'active') return res.status(404).json({ success: false });
+    request.status = 'accepted';
+    request.helperId = helperId;
+    await request.save();
+    res.json({ success: true, request });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/help-requests/:id/complete', async (req, res) => {
+  try {
+    const request = await HelpRequest.findById(req.params.id).populate('userId').populate('helperId');
+    if (!request) return res.status(404).json({ success: false });
+    
+    const requester = await User.findById(request.userId);
+    const helper = await User.findById(request.helperId);
+    
+    if (requester.balance < request.reward) {
+      return res.status(400).json({ success: false, message: 'Not enough points' });
+    }
+    
+    requester.balance -= request.reward;
+    helper.balance += Math.floor(request.reward * 0.75);
+    
+    await requester.save();
+    await helper.save();
+    
+    request.status = 'completed';
+    await request.save();
+    
+    await Transaction.create({ userId: request.userId, type: 'help_payment', amount: -request.reward, description: 'Help payment' });
+    await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: Math.floor(request.reward * 0.75), description: 'Help reward' });
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/help-requests/:id/cancel', async (req, res) => {
+  try {
+    const request = await HelpRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ success: false });
+    request.status = 'cancelled';
+    await request.save();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
 app.get('/api/parkings/nearby', async (req, res) => {
   try {
     const parkings = await Parking.find({ status: 'available', expiresAt: { $gt: new Date() } })

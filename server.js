@@ -196,7 +196,6 @@ setInterval(async () => {
     console.log("Timer check error:", error);
   }
 }, 60000);
-}, 60000);
 
 // ==================== ROUTES ====================
 

@@ -63,6 +63,7 @@ const parkingSchema = new mongoose.Schema({
   address: { type: String, required: true },
   price: { type: Number, required: true },
   timeToLeave: { type: Number, required: true },
+  expiresAt: { type: Date },
   status: { type: String, enum: ['available', 'booked', 'expired', 'cancelled', 'completed'], default: 'available' },
   bookedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   bookedAt: Date,
@@ -184,18 +185,17 @@ mongoose.connect(MONGODB_URI)
 
 // ==================== TIMER ====================
 
+
 setInterval(async () => {
   try {
     await Parking.updateMany(
-      { status: 'available', timeToLeave: { $gt: 0 } },
-      { $inc: { timeToLeave: -1 } }
-    );
-    await Parking.updateMany(
-      { status: 'available', timeToLeave: { $lte: 0 } },
+      { status: 'available', expiresAt: { $lte: new Date() } },
       { status: 'expired' }
     );
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);}
+    console.log("Timer check error:", error);
+  }
+}, 60000);
 }, 60000);
 
 // ==================== ROUTES ====================
@@ -707,11 +707,15 @@ app.get('/api/users/:id/history', async (req, res) => {
 
 app.get('/api/parkings/nearby', async (req, res) => {
   try {
-    const parkings = await Parking.find({ status: 'available', timeToLeave: { $gt: 0 } })
+    const parkings = await Parking.find({ status: 'available', expiresAt: { $gt: new Date() } })
       .populate('ownerId', 'name car avatar rating ratingCount');
-    res.json(parkings);
+    const result = parkings.map(p => ({
+      ...p.toObject(),
+      timeToLeave: Math.max(0, Math.round((new Date(p.expiresAt) - new Date()) / 60000))
+    }));
+    res.json(result);
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET PARKINGS ERROR:", error);
     res.status(500).json([]);
   }
 });
@@ -726,7 +730,7 @@ app.post('/api/parkings/create', async (req, res) => {
     }
     const owner = await User.findById(ownerId);
     const newParking = new Parking({
-      ownerId, location, address, price, timeToLeave, status: 'available',
+      ownerId, location, address, price, timeToLeave, expiresAt: new Date(Date.now() + timeToLeave * 60000), status: 'available',
       ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating,
       extensionsUsed: 0, messages: []
     });
@@ -873,7 +877,7 @@ app.post('/api/parkings/:id/extend', async (req, res) => {
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
     if (parking.extensionsUsed >= 2) return res.status(400).json({ success: false, message: 'Лимит продлений' });
-    parking.timeToLeave += minutes;
+    parking.expiresAt = new Date(parking.expiresAt.getTime() + minutes * 60000);
     parking.extensionsUsed += 1;
     await parking.save();
     res.json({ success: true, parking });
@@ -1042,7 +1046,7 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     if (!parking) return res.status(404).json({ success: false });
     
     if (accepted && parking.waitRequest) {
-      parking.timeToLeave += parking.waitRequest.minutes;
+      parking.expiresAt = new Date(parking.expiresAt.getTime() + parking.waitRequest.minutes * 60000);
     }
     
     // Save response for owner to see

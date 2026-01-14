@@ -811,13 +811,18 @@ app.get('/api/users/:id/my-help-request', async (req, res) => {
   }
 });
 
+
 app.post('/api/help-requests/:id/complete', async (req, res) => {
   try {
-    const request = await HelpRequest.findById(req.params.id).populate('userId').populate('helperId');
+    const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
     
     const requester = await User.findById(request.userId);
     const helper = await User.findById(request.helperId);
+    
+    if (!requester || !helper) {
+      return res.status(404).json({ success: false, message: 'Users not found' });
+    }
     
     if (requester.balance < request.reward) {
       return res.status(400).json({ success: false, message: 'Not enough points' });
@@ -837,7 +842,8 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ success: false });
+    console.log('HELP COMPLETE ERROR:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

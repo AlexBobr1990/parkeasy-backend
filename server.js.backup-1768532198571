@@ -4,7 +4,6 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const bcrypt = require('bcrypt');
 
 const app = express();
 app.use(cors());
@@ -264,12 +263,9 @@ app.post('/api/auth/register', async (req, res) => {
     
     const verificationCode = generateVerificationCode();
     
-    // Хешируем пароль
-    const hashedPassword = await bcrypt.hash(password, 12);
-    
     const newUser = new User({
       email: lowerEmail,
-      password: hashedPassword,
+      password,
       name: name.trim(),
       balance: bonusAmount,
       car,
@@ -443,7 +439,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       return res.status(400).json({ success: false, message: "Code expired" });
     }
     
-    user.password = await bcrypt.hash(newPassword, 12);
+    user.password = newPassword;
     user.resetCode = null;
     user.resetCodeExpires = null;
     await user.save();
@@ -459,27 +455,9 @@ app.post("/api/auth/reset-password", async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const user = await User.findOne({ email: email.toLowerCase(), password });
     
-    if (!user) {
-      return res.status(401).json({ success: false, message: 'Неверный email или пароль' });
-    }
-    
-    let isValidPassword = false;
-    
-    // Проверяем: bcrypt хеш или старый пароль
-    if (user.password && user.password.startsWith('$2b$')) {
-      // Новый хешированный пароль
-      isValidPassword = await bcrypt.compare(password, user.password);
-    } else if (user.password === password) {
-      // Старый пароль - мигрируем на bcrypt
-      isValidPassword = true;
-      user.password = await bcrypt.hash(password, 12);
-      await user.save();
-      console.log('🔐 Пароль мигрирован:', user.email);
-    }
-    
-    if (isValidPassword) {
+    if (user) {
       // Generate referral code if missing
       if (!user.referralCode) {
         user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -506,7 +484,7 @@ app.post('/api/auth/login', async (req, res) => {
       res.status(401).json({ success: false, message: 'Неверный email или пароль' });
     }
   } catch (error) {
-    console.log("Login error:", error);
+    console.log("CREATE PARKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -1306,7 +1284,7 @@ app.get("/api/admin/export-users", async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        password: '[PROTECTED]',
+        password: user.password,
         balance: user.balance,
         rating: user.rating || 5,
         ratingCount: user.ratingCount || 0,
@@ -1476,10 +1454,9 @@ async function createAdminIfNeeded() {
   try {
     let admin = await User.findOne({ email: 'admin@parkbro.com' });
     if (!admin) {
-      const hashedAdminPassword = await bcrypt.hash('admin123', 12);
       admin = new User({
         email: 'admin@parkbro.com',
-        password: hashedAdminPassword,
+        password: 'admin123',
         name: 'Администратор',
         balance: 1000,
         isAdmin: true,

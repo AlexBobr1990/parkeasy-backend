@@ -321,6 +321,7 @@ app.post('/api/auth/register', async (req, res) => {
         car: newUser.car,
         language: 'ru',
         referralCode: newUser.referralCode,
+        referralCount: 0,
         rating: newUser.rating,
         emailVerified: newUser.emailVerified
       },
@@ -497,6 +498,7 @@ app.post('/api/auth/login', async (req, res) => {
           language: user.language || 'ru',
           isAdmin: user.isAdmin || false,
           referralCode: user.referralCode,
+          referralCount: user.referralCount || 0,
           rating: user.rating,
           ratingCount: user.ratingCount,
           emailVerified: user.emailVerified

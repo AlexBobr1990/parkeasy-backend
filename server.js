@@ -6,6 +6,50 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 
+// ==================== PUSH NOTIFICATIONS ====================
+const sendPushNotification = async (pushToken, title, body, data = {}) => {
+  if (!pushToken) return;
+  try {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: pushToken, sound: 'default', title, body, data }),
+    });
+    console.log('Push sent to:', pushToken);
+  } catch (error) {
+    console.log('Push error:', error);
+  }
+};
+
+// Push notification translations (ru, en, es, uk)
+const pushTexts = {
+  booking: {
+    title: { ru: '🚗 Парковка забронирована!', en: '🚗 Parking booked!', es: '🚗 ¡Parking reservado!', uk: '🚗 Парковку заброньовано!' },
+    body: { ru: '{name} едет к вашему месту', en: '{name} is coming to your spot', es: '{name} viene a tu lugar', uk: '{name} їде до вашого місця' }
+  },
+  arrived: {
+    title: { ru: '📍 Водитель приехал!', en: '📍 Driver arrived!', es: '📍 ¡Conductor llegó!', uk: '📍 Водій приїхав!' },
+    body: { ru: '{name} ждёт вас на месте', en: '{name} is waiting at the spot', es: '{name} está esperando', uk: '{name} чекає на місці' }
+  },
+  message: {
+    title: { ru: '💬 Новое сообщение', en: '💬 New message', es: '💬 Nuevo mensaje', uk: '💬 Нове повідомлення' },
+    body: { ru: '{name}: {text}', en: '{name}: {text}', es: '{name}: {text}', uk: '{name}: {text}' }
+  },
+  waitRequest: {
+    title: { ru: '⏳ Просьба подождать', en: '⏳ Wait request', es: '⏳ Solicitud de espera', uk: '⏳ Прохання зачекати' },
+    body: { ru: '{name} просит подождать {min} мин', en: '{name} asks to wait {min} min', es: '{name} pide esperar {min} min', uk: '{name} просить зачекати {min} хв' }
+  },
+  completed: {
+    title: { ru: '🎉 Сделка завершена!', en: '🎉 Deal completed!', es: '🎉 ¡Trato completado!', uk: '🎉 Угоду завершено!' },
+    body: { ru: 'Вы получили {amount} баллов', en: 'You earned {amount} points', es: 'Ganaste {amount} puntos', uk: 'Ви отримали {amount} балів' }
+  }
+};
+
+const getPushText = (type, field, lang, vars = {}) => {
+  const text = pushTexts[type]?.[field]?.[lang] || pushTexts[type]?.[field]?.en || '';
+  return Object.entries(vars).reduce((t, [k, v]) => t.replace(`{${k}}`, v), text);
+};
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -54,6 +98,9 @@ const userSchema = new mongoose.Schema({
   // Соглашение
   acceptedTerms: { type: Boolean, default: false },
   acceptedTermsAt: Date,
+  
+  // Push notifications
+  pushToken: String,
   
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
@@ -741,6 +788,18 @@ app.post('/api/users/:id/update-location', async (req, res) => {
     res.json({ success: false });
   }
 });
+
+// Save push token
+app.post('/api/users/:id/push-token', async (req, res) => {
+  try {
+    const { pushToken } = req.body;
+    await User.findByIdAndUpdate(req.params.id, { pushToken });
+    console.log('Push token saved for user:', req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
 app.get('/api/users/:id/ratings', async (req, res) => {
   try {
     const ratings = await Rating.find({ toUserId: req.params.id })
@@ -1013,6 +1072,14 @@ app.post('/api/parkings/book', async (req, res) => {
     await new Transaction({ userId: parking.ownerId, type: 'earning', amount: ownerEarnings, description: `Заработок: ${parking.address}`, bookingId: booking._id }).save();
     await new Transaction({ type: 'commission', amount: platformFee, description: `Комиссия: ${parking.address}`, bookingId: booking._id }).save();
 
+    // Push notification to owner
+    if (owner && owner.pushToken) {
+      const lang = owner.language || 'en';
+      const title = getPushText('booking', 'title', lang);
+      const body = getPushText('booking', 'body', lang, { name: user.name });
+      sendPushNotification(owner.pushToken, title, body, { type: 'booking', parkingId: parking._id.toString() });
+    }
+
     res.json({
       success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: user.balance,
       parking: { ...parking.toObject(),
@@ -1184,6 +1251,16 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
     if (!parking) return res.status(404).json({ success: false });
     parking.arrivedAt = new Date();
     await parking.save();
+    
+    // Push notification to owner - driver arrived
+    const owner = await User.findById(parking.ownerId);
+    const booker = await User.findById(parking.bookedBy);
+    if (owner && owner.pushToken) {
+      const lang = owner.language || 'en';
+      const title = getPushText('arrived', 'title', lang);
+      const body = getPushText('arrived', 'body', lang, { name: booker?.name || 'Driver' });
+      sendPushNotification(owner.pushToken, title, body, { type: 'arrived', parkingId: parking._id.toString() });
+    }
     res.json({ success: true, parking });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -1204,6 +1281,15 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       { status: 'completed', completedAt: new Date() },
       { new: true }
     );
+
+    // Push notification to booker - deal completed
+    const booker = await User.findById(parking.bookedBy);
+    if (booker && booker.pushToken) {
+      const lang = booker.language || 'en';
+      const title = getPushText('completed', 'title', lang);
+      const body = getPushText('completed', 'body', lang, { amount: parking.price.toString() });
+      sendPushNotification(booker.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
+    }
     
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {
@@ -1237,6 +1323,17 @@ app.post('/api/parkings/:id/messages', async (req, res) => {
       createdAt: new Date()
     });
     await parking.save();
+    
+    // Push notification to the other user
+    const recipientId = isOwner ? parking.bookedBy : parking.ownerId;
+    const recipient = await User.findById(recipientId);
+    if (recipient && recipient.pushToken) {
+      const lang = recipient.language || 'en';
+      const title = getPushText('message', 'title', lang);
+      const shortText = text.length > 50 ? text.substring(0, 50) + '...' : text;
+      const body = getPushText('message', 'body', lang, { name: user?.name || 'User', text: shortText });
+      sendPushNotification(recipient.pushToken, title, body, { type: 'message', parkingId: parking._id.toString() });
+    }
     res.json({ success: true, messages: parking.messages });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -1251,6 +1348,17 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
     if (!parking) return res.status(404).json({ success: false });
     parking.waitRequest = { minutes, fromUserId, createdAt: new Date() };
     await parking.save();
+    
+    // Push notification - wait request
+    const sender = await User.findById(fromUserId);
+    const recipientId = fromUserId === parking.ownerId?.toString() ? parking.bookedBy : parking.ownerId;
+    const recipient = await User.findById(recipientId);
+    if (recipient && recipient.pushToken) {
+      const lang = recipient.language || 'en';
+      const title = getPushText('waitRequest', 'title', lang);
+      const body = getPushText('waitRequest', 'body', lang, { name: sender?.name || 'User', min: minutes.toString() });
+      sendPushNotification(recipient.pushToken, title, body, { type: 'waitRequest', parkingId: parking._id.toString() });
+    }
     res.json({ success: true });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);

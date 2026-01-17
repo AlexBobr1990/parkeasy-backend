@@ -14,6 +14,7 @@ const userSchema = new mongoose.Schema({
   avatar: { type: String, default: null },
   language: { type: String, enum: ['ru', 'en'], default: 'ru' },
   isAdmin: { type: Boolean, default: false },
+  pushToken: { type: String, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 

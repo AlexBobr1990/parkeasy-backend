@@ -508,6 +508,11 @@ app.delete('/api/users/:id/account', async (req, res) => {
   try {
     const userId = req.params.id;
     
+    // Проверяем валидность ObjectId
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
     // Проверяем что пользователь существует
     const user = await User.findById(userId);
     if (!user) {

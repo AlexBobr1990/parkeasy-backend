@@ -550,11 +550,6 @@ app.delete('/api/users/:id/account', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-    console.log("CREATE PARKING ERROR:", error);
-    console.log("Reset password error:", error);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-});
 
 app.post('/api/auth/login', async (req, res) => {
   try {

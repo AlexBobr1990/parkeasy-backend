@@ -498,6 +498,58 @@ app.post("/api/auth/reset-password", async (req, res) => {
     
     res.json({ success: true, message: "Password updated" });
   } catch (error) {
+    console.log("RESET PASSWORD ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ==================== DELETE ACCOUNT ====================
+app.delete('/api/users/:id/account', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    
+    // Проверяем что пользователь существует
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Отменяем активные парковки пользователя
+    await Parking.updateMany(
+      { ownerId: userId, status: { $in: ['available', 'booked'] } },
+      { status: 'cancelled' }
+    );
+    
+    // Освобождаем забронированные пользователем парковки
+    await Parking.updateMany(
+      { bookedBy: userId, status: 'booked' },
+      { bookedBy: null, status: 'available', bookedAt: null, arrivedAt: null }
+    );
+    
+    // Отменяем активные запросы помощи
+    await HelpRequest.updateMany(
+      { $or: [{ userId }, { helperId: userId }], status: 'active' },
+      { status: 'cancelled' }
+    );
+    
+    // Удаляем все связанные данные
+    await Parking.deleteMany({ ownerId: userId });
+    await Booking.deleteMany({ $or: [{ userId }, { ownerId: userId }] });
+    await Transaction.deleteMany({ userId });
+    await Rating.deleteMany({ $or: [{ fromUserId: userId }, { toUserId: userId }] });
+    await HelpRequest.deleteMany({ $or: [{ userId }, { helperId: userId }] });
+    
+    // Удаляем самого пользователя
+    await User.findByIdAndDelete(userId);
+    
+    console.log(`🗑️ Account deleted: ${user.email}`);
+    
+    res.json({ success: true, message: 'Account deleted successfully' });
+  } catch (error) {
+    console.log("DELETE ACCOUNT ERROR:", error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
     console.log("CREATE PARKING ERROR:", error);
     console.log("Reset password error:", error);
     res.status(500).json({ success: false, message: "Server error" });

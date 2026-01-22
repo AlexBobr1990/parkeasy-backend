@@ -1023,44 +1023,55 @@ app.post('/api/parkings/create', async (req, res) => {
 app.post('/api/parkings/book', async (req, res) => {
   try {
     const { parkingId, userId } = req.body;
-    const parking = await Parking.findById(parkingId);
+    
+    // Предварительные проверки
     const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    
+    const parkingCheck = await Parking.findById(parkingId);
+    if (!parkingCheck) return res.status(404).json({ success: false, message: 'Парковка не найдена' });
+    if (parkingCheck.ownerId.toString() === userId) return res.status(400).json({ success: false, message: 'Нельзя забронировать свою парковку' });
+    if (user.balance < parkingCheck.price) return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
 
-    if (!parking) return res.status(404).json({ success: false, message: 'Парковка не найдена' });
-    if (parking.status !== 'available') return res.status(400).json({ success: false, message: 'Парковка уже занята' });
-    if (parking.ownerId.toString() === userId) return res.status(400).json({ success: false, message: 'Нельзя забронировать свою парковку' });
-    if (user.balance < parking.price) return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
+    // ✅ АТОМАРНАЯ ОПЕРАЦИЯ: бронируем только если status === 'available'
+    const parking = await Parking.findOneAndUpdate(
+      { _id: parkingId, status: 'available' },  // Условие: только если available
+      { 
+        status: 'booked',
+        bookedBy: userId,
+        bookedAt: new Date(),
+        bookerCar: user.car,
+        bookerName: user.name,
+        bookerAvatar: user.avatar,
+        bookerRating: user.rating
+      },
+      { new: true }  // Вернуть обновлённый документ
+    );
 
+    // Если parking === null, значит кто-то уже забронировал
+    if (!parking) {
+      return res.status(400).json({ success: false, message: 'Парковка уже занята' });
+    }
+
+    // Теперь безопасно списываем баллы (парковка уже наша)
     user.balance -= parking.price;
     await user.save();
 
     const platformFee = Math.ceil(parking.price * 0.25);
     const ownerEarnings = parking.price - platformFee;
 
-    const owner = await User.findById(parking.ownerId);
-    console.log("=== BOOKING PAYMENT ===");
+    // Начисляем владельцу атомарно
+    const owner = await User.findByIdAndUpdate(
+      parking.ownerId,
+      { $inc: { balance: ownerEarnings } },
+      { new: true }
+    );
+    
+    console.log("=== BOOKING PAYMENT (ATOMIC) ===");
     console.log("Parking ID:", parkingId);
-    console.log("Owner ID:", parking.ownerId);
-    console.log("Owner found:", !!owner);
-    if (owner) {
-      console.log("Owner name:", owner.name);
-      console.log("Owner balance BEFORE:", owner.balance);
-      console.log("Will add ownerEarnings:", ownerEarnings);
-      owner.balance = (owner.balance || 0) + ownerEarnings;
-      const savedOwner = await owner.save();
-      console.log("Owner balance AFTER save:", savedOwner.balance);
-    } else {
-      console.log("ERROR: Owner not found for parking.ownerId:", parking.ownerId);
-    }
-
-    parking.status = 'booked';
-    parking.bookedBy = userId;
-    parking.bookedAt = new Date();
-    parking.bookerCar = user.car;
-    parking.bookerName = user.name;
-    parking.bookerAvatar = user.avatar;
-    parking.bookerRating = user.rating;
-    await parking.save();
+    console.log("User paid:", parking.price);
+    console.log("Owner earned:", ownerEarnings);
+    console.log("Platform fee:", platformFee);
 
     const booking = new Booking({
       parkingId: parking._id, userId, ownerId: parking.ownerId,

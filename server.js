@@ -508,6 +508,42 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
+// ==================== RECALCULATE RATINGS ====================
+app.post('/api/admin/recalculate-ratings', async (req, res) => {
+  try {
+    // Получаем всех пользователей
+    const users = await User.find({});
+    let updated = 0;
+    
+    for (const user of users) {
+      // Считаем реальные рейтинги из коллекции ratings
+      const ratings = await Rating.find({ toUserId: user._id.toString() });
+      
+      if (ratings.length === 0) {
+        // Нет отзывов - сбрасываем
+        user.ratingCount = 0;
+        user.totalRatingSum = 0;
+        user.rating = 0;
+      } else {
+        // Пересчитываем
+        const sum = ratings.reduce((acc, r) => acc + r.rating, 0);
+        user.ratingCount = ratings.length;
+        user.totalRatingSum = sum;
+        user.rating = sum / ratings.length;
+      }
+      
+      await user.save();
+      updated++;
+    }
+    
+    console.log(`✅ Recalculated ratings for ${updated} users`);
+    res.json({ success: true, message: `Recalculated ratings for ${updated} users` });
+  } catch (error) {
+    console.log("RECALCULATE ERROR:", error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== DELETE ACCOUNT ====================
 app.delete('/api/users/:id/account', async (req, res) => {
   try {

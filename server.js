@@ -546,7 +546,8 @@ app.delete('/api/users/:id/account', async (req, res) => {
     await Parking.deleteMany({ ownerId: userId });
     await Booking.deleteMany({ $or: [{ userId }, { ownerId: userId }] });
     await Transaction.deleteMany({ userId });
-    await Rating.deleteMany({ $or: [{ fromUserId: userId }, { toUserId: userId }] });
+    // Удаляем только рейтинги ОТПРАВЛЕННЫЕ пользователем (полученные сохраняем)
+    await Rating.deleteMany({ fromUserId: userId });
     await HelpRequest.deleteMany({ $or: [{ userId }, { helperId: userId }] });
     
     // Удаляем самого пользователя

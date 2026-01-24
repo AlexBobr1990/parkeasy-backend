@@ -508,6 +508,23 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
+// ==================== CHECK REFERRAL CODE ====================
+app.get('/api/referral/check/:code', async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+    const user = await User.findOne({ referralCode: code });
+    
+    if (user) {
+      res.json({ valid: true, ownerName: user.name });
+    } else {
+      res.json({ valid: false });
+    }
+  } catch (error) {
+    console.log("CHECK REFERRAL ERROR:", error);
+    res.json({ valid: false });
+  }
+});
+
 // ==================== RECALCULATE RATINGS ====================
 app.post('/api/admin/recalculate-ratings', async (req, res) => {
   try {

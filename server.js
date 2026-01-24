@@ -42,6 +42,10 @@ const pushTexts = {
   completed: {
     title: { ru: '🎉 Сделка завершена!', en: '🎉 Deal completed!', es: '🎉 ¡Trato completado!', uk: '🎉 Угоду завершено!' },
     body: { ru: 'Вы получили {amount} баллов', en: 'You earned {amount} points', es: 'Ganaste {amount} puntos', uk: 'Ви отримали {amount} балів' }
+  },
+  completedBooker: {
+    title: { ru: '🎉 Сделка завершена!', en: '🎉 Deal completed!', es: '🎉 ¡Trato completado!', uk: '🎉 Угоду завершено!' },
+    body: { ru: 'Парковка успешно передана. Спасибо!', en: 'Parking spot handed over. Thank you!', es: 'Lugar entregado con éxito. ¡Gracias!', uk: 'Парковку успішно передано. Дякуємо!' }
   }
 };
 
@@ -498,7 +502,8 @@ app.post("/api/auth/reset-password", async (req, res) => {
     
     res.json({ success: true, message: "Password updated" });
   } catch (error) {
-    console.log("RESET PASSWORD ERROR:", error);
+    console.log("CREATE PARKING ERROR:", error);
+    console.log("Reset password error:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -1345,13 +1350,23 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       { new: true }
     );
 
-    // Push notification to booker - deal completed
+    // Push notification to booker - deal completed (no earnings, just confirmation)
     const booker = await User.findById(parking.bookedBy);
     if (booker && booker.pushToken) {
       const lang = booker.language || 'en';
-      const title = getPushText('completed', 'title', lang);
-      const body = getPushText('completed', 'body', lang, { amount: parking.price.toString() });
+      const title = getPushText('completedBooker', 'title', lang);
+      const body = getPushText('completedBooker', 'body', lang);
       sendPushNotification(booker.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
+    }
+    
+    // Push notification to owner - you earned points
+    const owner = await User.findById(parking.ownerId);
+    if (owner && owner.pushToken) {
+      const lang = owner.language || 'en';
+      const ownerEarnings = Math.floor(parking.price * 0.75);
+      const title = getPushText('completed', 'title', lang);
+      const body = getPushText('completed', 'body', lang, { amount: ownerEarnings.toString() });
+      sendPushNotification(owner.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
     }
     
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });

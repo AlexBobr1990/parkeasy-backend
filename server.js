@@ -108,6 +108,20 @@ const userSchema = new mongoose.Schema({
   
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
+  
+  // Друзья и приватность
+  hideOnline: { type: Boolean, default: false },
+  
+  // Статистика
+  parkingsGiven: { type: Number, default: 0 },
+  parkingsReceived: { type: Number, default: 0 },
+  
+  // Достижения
+  achievements: [{
+    id: String,
+    unlockedAt: Date
+  }],
+  
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -205,6 +219,52 @@ const Parking = mongoose.model('Parking', parkingSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 const Rating = mongoose.model('Rating', ratingSchema);
+
+// Сообщения между друзьями
+const friendMessageSchema = new mongoose.Schema({
+  fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  text: { type: String, required: true },
+  read: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Запрос парковки от друга
+const parkingRequestSchema = new mongoose.Schema({
+  fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  message: String,
+  status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, default: () => new Date(Date.now() + 30 * 60 * 1000) }
+});
+
+const FriendMessage = mongoose.model('FriendMessage', friendMessageSchema);
+const ParkingRequest = mongoose.model('ParkingRequest', parkingRequestSchema);
+
+// Дружба между пользователями (помимо рефералов)
+const friendshipSchema = new mongoose.Schema({
+  user1: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  user2: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  status: { type: String, enum: ['pending', 'accepted', 'declined'], default: 'pending' },
+  initiatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // Избранный друг
+  favorite1: { type: Boolean, default: false }, // user1 добавил user2 в избранные
+  favorite2: { type: Boolean, default: false }, // user2 добавил user1 в избранные
+  // Статистика между друзьями
+  exchangeCount: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Блокировка пользователей
+const blockedUserSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  blockedUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Friendship = mongoose.model('Friendship', friendshipSchema);
+const BlockedUser = mongoose.model('BlockedUser', blockedUserSchema);
 
 const helpRequestSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -522,6 +582,818 @@ app.get('/api/referral/check/:code', async (req, res) => {
   } catch (error) {
     console.log("CHECK REFERRAL ERROR:", error);
     res.json({ valid: false });
+  }
+});
+
+// ==================== FRIENDS SYSTEM ====================
+
+// Получить список друзей (рефералы + Friendship)
+app.get('/api/users/:id/friends', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId);
+    if (!user) return res.json([]);
+    
+    // Получаем блокированных
+    const blockedUsers = await BlockedUser.find({ 
+      $or: [{ userId }, { blockedUserId: userId }]
+    });
+    const blockedIds = blockedUsers.map(b => 
+      b.userId.toString() === userId ? b.blockedUserId.toString() : b.userId.toString()
+    );
+    
+    // 1. Друзья через рефералы
+    const friendsWhoUsedMyCode = await User.find({ 
+      referredBy: userId,
+      _id: { $nin: blockedIds }
+    }).select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    
+    let myReferrer = null;
+    if (user.referredBy && !blockedIds.includes(user.referredBy.toString())) {
+      myReferrer = await User.findById(user.referredBy)
+        .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    }
+    
+    // 2. Друзья через Friendship
+    const friendships = await Friendship.find({
+      $or: [{ user1: userId }, { user2: userId }],
+      status: 'accepted'
+    });
+    
+    const friendshipFriends = [];
+    for (const f of friendships) {
+      const friendId = f.user1.toString() === userId ? f.user2 : f.user1;
+      if (blockedIds.includes(friendId.toString())) continue;
+      
+      const friendUser = await User.findById(friendId)
+        .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+      
+      if (friendUser) {
+        const isFavorite = f.user1.toString() === userId ? f.favorite1 : f.favorite2;
+        friendshipFriends.push({ 
+          user: friendUser, 
+          isFavorite, 
+          friendshipId: f._id,
+          exchangeCount: f.exchangeCount || 0
+        });
+      }
+    }
+    
+    // Собираем всех друзей
+    const allFriendsRaw = [];
+    
+    // Добавляем реферера первым
+    if (myReferrer) {
+      allFriendsRaw.push({ user: myReferrer, isReferral: true, isMyReferrer: true });
+    }
+    
+    // Добавляем тех кто использовал мой код
+    for (const f of friendsWhoUsedMyCode) {
+      allFriendsRaw.push({ user: f, isReferral: true, usedMyCode: true });
+    }
+    
+    // Добавляем друзей через Friendship (избегая дубликатов)
+    for (const f of friendshipFriends) {
+      const exists = allFriendsRaw.find(fr => fr.user._id.toString() === f.user._id.toString());
+      if (!exists) {
+        allFriendsRaw.push(f);
+      } else {
+        // Обновляем isFavorite если уже есть
+        exists.isFavorite = f.isFavorite;
+        exists.friendshipId = f.friendshipId;
+        exists.exchangeCount = f.exchangeCount;
+      }
+    }
+    
+    // Добавляем информацию об онлайн статусе и непрочитанных
+    const friendsWithStatus = await Promise.all(allFriendsRaw.map(async (friendData) => {
+      const friend = friendData.user;
+      const now = new Date();
+      const lastActivity = new Date(friend.lastActivity);
+      const diffMs = now - lastActivity;
+      const diffMins = Math.floor(diffMs / 60000);
+      
+      const isOnline = friend.hideOnline ? false : diffMins < 5;
+      
+      const unreadCount = await FriendMessage.countDocuments({
+        fromUserId: friend._id,
+        toUserId: userId,
+        read: false
+      });
+      
+      // Последний визит
+      let lastSeenText = null;
+      if (!friend.hideOnline && !isOnline) {
+        if (diffMins < 60) {
+          lastSeenText = `${diffMins}m`;
+        } else if (diffMins < 1440) {
+          lastSeenText = `${Math.floor(diffMins / 60)}h`;
+        } else {
+          lastSeenText = `${Math.floor(diffMins / 1440)}d`;
+        }
+      }
+      
+      return {
+        _id: friend._id,
+        name: friend.name,
+        avatar: friend.avatar,
+        rating: friend.rating,
+        ratingCount: friend.ratingCount,
+        isOnline,
+        lastSeenText,
+        unreadCount,
+        isFavorite: friendData.isFavorite || false,
+        friendshipId: friendData.friendshipId || null,
+        isReferral: friendData.isReferral || false,
+        exchangeCount: friendData.exchangeCount || 0
+      };
+    }));
+    
+    // Сортируем: избранные сверху, потом онлайн, потом по имени
+    friendsWithStatus.sort((a, b) => {
+      if (a.isFavorite && !b.isFavorite) return -1;
+      if (!a.isFavorite && b.isFavorite) return 1;
+      if (a.isOnline && !b.isOnline) return -1;
+      if (!a.isOnline && b.isOnline) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    res.json(friendsWithStatus);
+  } catch (error) {
+    console.log("GET FRIENDS ERROR:", error);
+    res.json([]);
+  }
+});
+
+// Отправить сообщение другу
+app.post('/api/friends/message', async (req, res) => {
+  try {
+    const { fromUserId, toUserId, text } = req.body;
+    
+    const message = new FriendMessage({ fromUserId, toUserId, text });
+    await message.save();
+    
+    // Отправляем push уведомление
+    const recipient = await User.findById(toUserId);
+    const sender = await User.findById(fromUserId);
+    
+    if (recipient && recipient.pushToken) {
+      const lang = recipient.language || 'en';
+      const titles = {
+        en: '💬 New message',
+        ru: '💬 Новое сообщение',
+        es: '💬 Nuevo mensaje',
+        uk: '💬 Нове повідомлення'
+      };
+      const bodies = {
+        en: `${sender?.name || 'Friend'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+        ru: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+        es: `${sender?.name || 'Amigo'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+        uk: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`
+      };
+      
+      sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'friend_message',
+        fromUserId: fromUserId.toString()
+      });
+    }
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    console.log("SEND FRIEND MESSAGE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Получить историю чата с другом
+app.get('/api/friends/messages/:friendId/:userId', async (req, res) => {
+  try {
+    const { friendId, userId } = req.params;
+    
+    const messages = await FriendMessage.find({
+      $or: [
+        { fromUserId: userId, toUserId: friendId },
+        { fromUserId: friendId, toUserId: userId }
+      ]
+    }).sort({ createdAt: 1 }).limit(100);
+    
+    res.json(messages);
+  } catch (error) {
+    console.log("GET FRIEND MESSAGES ERROR:", error);
+    res.json([]);
+  }
+});
+
+// Пометить сообщения прочитанными
+app.post('/api/friends/mark-read', async (req, res) => {
+  try {
+    const { friendId, userId } = req.body;
+    
+    await FriendMessage.updateMany(
+      { fromUserId: friendId, toUserId: userId, read: false },
+      { read: true }
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("MARK READ ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Общее количество непрочитанных сообщений от друзей
+app.get('/api/users/:id/unread-messages', async (req, res) => {
+  try {
+    const count = await FriendMessage.countDocuments({
+      toUserId: req.params.id,
+      read: false
+    });
+    res.json({ count });
+  } catch (error) {
+    res.json({ count: 0 });
+  }
+});
+
+// Скрыть/показать онлайн статус
+app.patch('/api/users/:id/hide-online', async (req, res) => {
+  try {
+    const { hideOnline } = req.body;
+    await User.findByIdAndUpdate(req.params.id, { hideOnline });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Попросить парковку у друга
+app.post('/api/friends/request-parking', async (req, res) => {
+  try {
+    const { fromUserId, toUserId, message } = req.body;
+    
+    // Проверяем нет ли уже активного запроса
+    const existingRequest = await ParkingRequest.findOne({
+      fromUserId,
+      toUserId,
+      status: 'pending',
+      expiresAt: { $gt: new Date() }
+    });
+    
+    if (existingRequest) {
+      return res.status(400).json({ success: false, message: 'Request already sent' });
+    }
+    
+    const request = new ParkingRequest({ fromUserId, toUserId, message });
+    await request.save();
+    
+    // Push уведомление
+    const recipient = await User.findById(toUserId);
+    const sender = await User.findById(fromUserId);
+    
+    if (recipient && recipient.pushToken) {
+      const lang = recipient.language || 'en';
+      const titles = {
+        en: '🅿️ Parking request',
+        ru: '🅿️ Запрос парковки',
+        es: '🅿️ Solicitud de estacionamiento',
+        uk: '🅿️ Запит парковки'
+      };
+      const bodies = {
+        en: `${sender?.name || 'Friend'} is looking for parking nearby. Can you help?`,
+        ru: `${sender?.name || 'Друг'} ищет парковку рядом. Можешь помочь?`,
+        es: `${sender?.name || 'Amigo'} busca estacionamiento cerca. ¿Puedes ayudar?`,
+        uk: `${sender?.name || 'Друг'} шукає парковку поруч. Можеш допомогти?`
+      };
+      
+      sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'parking_request',
+        requestId: request._id.toString(),
+        fromUserId: fromUserId.toString()
+      });
+    }
+    
+    res.json({ success: true, request });
+  } catch (error) {
+    console.log("REQUEST PARKING ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Ответить на запрос парковки
+app.post('/api/friends/respond-parking-request', async (req, res) => {
+  try {
+    const { requestId, accepted } = req.body;
+    
+    const request = await ParkingRequest.findByIdAndUpdate(
+      requestId,
+      { status: accepted ? 'accepted' : 'declined' },
+      { new: true }
+    );
+    
+    // Push уведомление отправителю запроса
+    const sender = await User.findById(request.fromUserId);
+    const responder = await User.findById(request.toUserId);
+    
+    if (sender && sender.pushToken) {
+      const lang = sender.language || 'en';
+      const titles = {
+        en: accepted ? '✅ Request accepted' : '❌ Request declined',
+        ru: accepted ? '✅ Запрос принят' : '❌ Запрос отклонён',
+        es: accepted ? '✅ Solicitud aceptada' : '❌ Solicitud rechazada',
+        uk: accepted ? '✅ Запит прийнято' : '❌ Запит відхилено'
+      };
+      const bodies = {
+        en: accepted ? `${responder?.name} will share their parking soon!` : `${responder?.name} can't help right now`,
+        ru: accepted ? `${responder?.name} скоро поделится парковкой!` : `${responder?.name} не может помочь сейчас`,
+        es: accepted ? `${responder?.name} compartirá su estacionamiento pronto!` : `${responder?.name} no puede ayudar ahora`,
+        uk: accepted ? `${responder?.name} скоро поділиться парковкою!` : `${responder?.name} не може допомогти зараз`
+      };
+      
+      sendPushNotification(sender.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'parking_request_response',
+        accepted
+      });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("RESPOND PARKING REQUEST ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Отправить парковку конкретному другу (приоритетный пуш)
+app.post('/api/parkings/:id/send-to-friend', async (req, res) => {
+  try {
+    const { friendId } = req.body;
+    const parking = await Parking.findById(req.params.id).populate('ownerId', 'name');
+    const friend = await User.findById(friendId);
+    
+    if (!parking || !friend) {
+      return res.status(404).json({ success: false });
+    }
+    
+    // Добавляем друга в приоритетный список
+    parking.priorityUser = friendId;
+    await parking.save();
+    
+    // Push уведомление другу
+    if (friend.pushToken) {
+      const lang = friend.language || 'en';
+      const titles = {
+        en: '🎁 Parking from friend!',
+        ru: '🎁 Парковка от друга!',
+        es: '🎁 ¡Estacionamiento de amigo!',
+        uk: '🎁 Парковка від друга!'
+      };
+      const bodies = {
+        en: `${parking.ownerId?.name || 'Friend'} is leaving a spot for you at ${parking.address}`,
+        ru: `${parking.ownerId?.name || 'Друг'} оставляет место для тебя: ${parking.address}`,
+        es: `${parking.ownerId?.name || 'Amigo'} te deja un lugar en ${parking.address}`,
+        uk: `${parking.ownerId?.name || 'Друг'} залишає місце для тебе: ${parking.address}`
+      };
+      
+      sendPushNotification(friend.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'friend_parking',
+        parkingId: parking._id.toString()
+      });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("SEND TO FRIEND ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Получить статистику пользователя
+app.get('/api/users/:id/stats', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ success: false });
+    
+    // Считаем достижения
+    const achievements = [];
+    
+    // Достижения за отданные парковки
+    if (user.parkingsGiven >= 1) achievements.push({ id: 'first_give', name: 'First Give', emoji: '🌱' });
+    if (user.parkingsGiven >= 10) achievements.push({ id: 'helper', name: 'Helper', emoji: '🤝' });
+    if (user.parkingsGiven >= 50) achievements.push({ id: 'generous', name: 'Generous', emoji: '💝' });
+    if (user.parkingsGiven >= 100) achievements.push({ id: 'legend', name: 'Legend', emoji: '🏆' });
+    
+    // Достижения за полученные парковки
+    if (user.parkingsReceived >= 1) achievements.push({ id: 'first_park', name: 'First Park', emoji: '🚗' });
+    if (user.parkingsReceived >= 25) achievements.push({ id: 'regular', name: 'Regular', emoji: '⭐' });
+    
+    // За высокий рейтинг
+    if (user.rating >= 4.8 && user.ratingCount >= 10) achievements.push({ id: 'trusted', name: 'Trusted', emoji: '💎' });
+    
+    // За друзей (рефералов)
+    if (user.referralCount >= 5) achievements.push({ id: 'networker', name: 'Networker', emoji: '🌐' });
+    if (user.referralCount >= 20) achievements.push({ id: 'influencer', name: 'Influencer', emoji: '👑' });
+    
+    res.json({
+      parkingsGiven: user.parkingsGiven || 0,
+      parkingsReceived: user.parkingsReceived || 0,
+      rating: user.rating,
+      ratingCount: user.ratingCount,
+      referralCount: user.referralCount || 0,
+      achievements
+    });
+  } catch (error) {
+    console.log("GET STATS ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// ==================== ДОПОЛНИТЕЛЬНЫЕ ФИЧИ ДРУЗЕЙ ====================
+
+// Добавить в избранные
+app.post('/api/friends/favorite', async (req, res) => {
+  try {
+    const { userId, friendId, favorite } = req.body;
+    
+    // Ищем существующую дружбу
+    let friendship = await Friendship.findOne({
+      $or: [
+        { user1: userId, user2: friendId },
+        { user1: friendId, user2: userId }
+      ]
+    });
+    
+    if (!friendship) {
+      // Создаём новую дружбу
+      friendship = new Friendship({ 
+        user1: userId, 
+        user2: friendId, 
+        status: 'accepted',
+        favorite1: true
+      });
+    } else {
+      // Обновляем избранное
+      if (friendship.user1.toString() === userId) {
+        friendship.favorite1 = favorite;
+      } else {
+        friendship.favorite2 = favorite;
+      }
+    }
+    
+    await friendship.save();
+    res.json({ success: true });
+  } catch (error) {
+    console.log("FAVORITE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Проверить является ли друг избранным
+app.get('/api/friends/is-favorite/:userId/:friendId', async (req, res) => {
+  try {
+    const { userId, friendId } = req.params;
+    
+    const friendship = await Friendship.findOne({
+      $or: [
+        { user1: userId, user2: friendId },
+        { user1: friendId, user2: userId }
+      ]
+    });
+    
+    if (!friendship) return res.json({ favorite: false });
+    
+    const isFavorite = friendship.user1.toString() === userId 
+      ? friendship.favorite1 
+      : friendship.favorite2;
+    
+    res.json({ favorite: isFavorite });
+  } catch (error) {
+    res.json({ favorite: false });
+  }
+});
+
+// Заблокировать пользователя
+app.post('/api/users/block', async (req, res) => {
+  try {
+    const { userId, blockedUserId } = req.body;
+    
+    // Проверяем нет ли уже блокировки
+    const existing = await BlockedUser.findOne({ userId, blockedUserId });
+    if (existing) return res.json({ success: true, message: 'Already blocked' });
+    
+    const block = new BlockedUser({ userId, blockedUserId });
+    await block.save();
+    
+    // Удаляем из друзей если есть
+    await Friendship.deleteOne({
+      $or: [
+        { user1: userId, user2: blockedUserId },
+        { user1: blockedUserId, user2: userId }
+      ]
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("BLOCK USER ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Разблокировать пользователя
+app.delete('/api/users/unblock/:userId/:blockedUserId', async (req, res) => {
+  try {
+    const { userId, blockedUserId } = req.params;
+    await BlockedUser.deleteOne({ userId, blockedUserId });
+    res.json({ success: true });
+  } catch (error) {
+    console.log("UNBLOCK ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Получить список заблокированных
+app.get('/api/users/:id/blocked', async (req, res) => {
+  try {
+    const blocked = await BlockedUser.find({ userId: req.params.id })
+      .populate('blockedUserId', 'name avatar');
+    res.json(blocked.map(b => b.blockedUserId));
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Проверить заблокирован ли пользователь
+app.get('/api/users/is-blocked/:userId/:targetId', async (req, res) => {
+  try {
+    const { userId, targetId } = req.params;
+    
+    // Проверяем блокировку в обе стороны
+    const blocked = await BlockedUser.findOne({
+      $or: [
+        { userId, blockedUserId: targetId },
+        { userId: targetId, blockedUserId: userId }
+      ]
+    });
+    
+    res.json({ blocked: !!blocked });
+  } catch (error) {
+    res.json({ blocked: false });
+  }
+});
+
+// Отправить запрос на дружбу (после успешного обмена)
+app.post('/api/friends/request', async (req, res) => {
+  try {
+    const { fromUserId, toUserId } = req.body;
+    
+    // Проверяем блокировку
+    const blocked = await BlockedUser.findOne({
+      $or: [
+        { userId: fromUserId, blockedUserId: toUserId },
+        { userId: toUserId, blockedUserId: fromUserId }
+      ]
+    });
+    if (blocked) return res.status(400).json({ success: false, message: 'User is blocked' });
+    
+    // Проверяем существует ли уже дружба
+    const existingFriendship = await Friendship.findOne({
+      $or: [
+        { user1: fromUserId, user2: toUserId },
+        { user1: toUserId, user2: fromUserId }
+      ]
+    });
+    
+    if (existingFriendship) {
+      if (existingFriendship.status === 'accepted') {
+        return res.json({ success: true, message: 'Already friends' });
+      }
+      if (existingFriendship.status === 'pending') {
+        return res.json({ success: true, message: 'Request already sent' });
+      }
+    }
+    
+    // Проверяем не друзья ли они уже через рефералы
+    const user = await User.findById(fromUserId);
+    const targetUser = await User.findById(toUserId);
+    
+    if (user.referredBy?.toString() === toUserId || targetUser.referredBy?.toString() === fromUserId) {
+      return res.json({ success: true, message: 'Already friends via referral' });
+    }
+    
+    // Создаём запрос на дружбу
+    const friendship = new Friendship({
+      user1: fromUserId,
+      user2: toUserId,
+      status: 'pending',
+      initiatedBy: fromUserId
+    });
+    await friendship.save();
+    
+    // Push уведомление
+    if (targetUser && targetUser.pushToken) {
+      const sender = await User.findById(fromUserId);
+      const lang = targetUser.language || 'en';
+      const titles = {
+        en: '👋 Friend request',
+        ru: '👋 Запрос в друзья',
+        es: '👋 Solicitud de amistad',
+        uk: '👋 Запит на дружбу'
+      };
+      const bodies = {
+        en: `${sender?.name || 'Someone'} wants to be your friend!`,
+        ru: `${sender?.name || 'Кто-то'} хочет добавить вас в друзья!`,
+        es: `${sender?.name || 'Alguien'} quiere ser tu amigo!`,
+        uk: `${sender?.name || 'Хтось'} хоче додати вас у друзі!`
+      };
+      
+      sendPushNotification(targetUser.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'friend_request',
+        fromUserId: fromUserId.toString()
+      });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("FRIEND REQUEST ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Принять/отклонить запрос дружбы
+app.post('/api/friends/respond', async (req, res) => {
+  try {
+    const { friendshipId, accept } = req.body;
+    
+    const friendship = await Friendship.findById(friendshipId);
+    if (!friendship) return res.status(404).json({ success: false });
+    
+    friendship.status = accept ? 'accepted' : 'declined';
+    await friendship.save();
+    
+    // Push уведомление инициатору
+    if (accept) {
+      const initiator = await User.findById(friendship.initiatedBy);
+      const responder = await User.findById(
+        friendship.user1.toString() === friendship.initiatedBy.toString() 
+          ? friendship.user2 
+          : friendship.user1
+      );
+      
+      if (initiator && initiator.pushToken) {
+        const lang = initiator.language || 'en';
+        const titles = {
+          en: '🎉 Friend request accepted!',
+          ru: '🎉 Запрос принят!',
+          es: '🎉 ¡Solicitud aceptada!',
+          uk: '🎉 Запит прийнято!'
+        };
+        const bodies = {
+          en: `${responder?.name || 'Someone'} is now your friend!`,
+          ru: `${responder?.name || 'Кто-то'} теперь ваш друг!`,
+          es: `${responder?.name || 'Alguien'} ahora es tu amigo!`,
+          uk: `${responder?.name || 'Хтось'} тепер ваш друг!`
+        };
+        
+        sendPushNotification(initiator.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+          type: 'friend_accepted'
+        });
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("RESPOND FRIEND ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Получить входящие запросы на дружбу
+app.get('/api/users/:id/friend-requests', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    
+    const requests = await Friendship.find({
+      user2: userId,
+      status: 'pending'
+    }).populate('user1', 'name avatar rating ratingCount');
+    
+    res.json(requests.map(r => ({
+      friendshipId: r._id,
+      user: r.user1,
+      createdAt: r.createdAt
+    })));
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Удалить из друзей
+app.delete('/api/friends/:friendshipId', async (req, res) => {
+  try {
+    await Friendship.findByIdAndDelete(req.params.friendshipId);
+    res.json({ success: true });
+  } catch (error) {
+    console.log("DELETE FRIEND ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Уведомить друзей о новой парковке рядом
+app.post('/api/parkings/:id/notify-nearby-friends', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const parking = await Parking.findById(req.params.id).populate('ownerId', 'name');
+    if (!parking) return res.status(404).json({ success: false });
+    
+    // Получаем друзей
+    const user = await User.findById(userId);
+    const friendsWhoUsedMyCode = await User.find({ referredBy: userId });
+    let myReferrer = user.referredBy ? await User.findById(user.referredBy) : null;
+    
+    const allFriends = [...friendsWhoUsedMyCode];
+    if (myReferrer) allFriends.push(myReferrer);
+    
+    // Также друзья через Friendship
+    const friendships = await Friendship.find({
+      $or: [{ user1: userId }, { user2: userId }],
+      status: 'accepted'
+    });
+    
+    for (const f of friendships) {
+      const friendId = f.user1.toString() === userId ? f.user2 : f.user1;
+      const friendUser = await User.findById(friendId);
+      if (friendUser && !allFriends.find(fr => fr._id.toString() === friendId.toString())) {
+        allFriends.push(friendUser);
+      }
+    }
+    
+    // Отправляем пуш тем кто рядом (в радиусе 2 км)
+    let notified = 0;
+    for (const friend of allFriends) {
+      if (!friend.lastLocation || !friend.pushToken) continue;
+      
+      // Считаем расстояние
+      const R = 6371;
+      const dLat = (friend.lastLocation.lat - parking.location.lat) * Math.PI / 180;
+      const dLon = (friend.lastLocation.lng - parking.location.lng) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(parking.location.lat * Math.PI / 180) * Math.cos(friend.lastLocation.lat * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const distance = R * c;
+      
+      if (distance <= 2) { // 2 км
+        const lang = friend.language || 'en';
+        const titles = {
+          en: '🅿️ Friend parking nearby!',
+          ru: '🅿️ Парковка друга рядом!',
+          es: '🅿️ ¡Estacionamiento de amigo cerca!',
+          uk: '🅿️ Парковка друга поруч!'
+        };
+        const bodies = {
+          en: `${parking.ownerId?.name || 'Friend'} is leaving at ${parking.address}`,
+          ru: `${parking.ownerId?.name || 'Друг'} уезжает: ${parking.address}`,
+          es: `${parking.ownerId?.name || 'Amigo'} sale de ${parking.address}`,
+          uk: `${parking.ownerId?.name || 'Друг'} виїжджає: ${parking.address}`
+        };
+        
+        sendPushNotification(friend.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+          type: 'friend_parking_nearby',
+          parkingId: parking._id.toString()
+        });
+        notified++;
+      }
+    }
+    
+    res.json({ success: true, notifiedCount: notified });
+  } catch (error) {
+    console.log("NOTIFY NEARBY ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Получить "был в сети X мин назад"
+app.get('/api/users/:id/last-seen', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('lastActivity hideOnline');
+    if (!user) return res.status(404).json({ success: false });
+    
+    if (user.hideOnline) {
+      return res.json({ lastSeen: null, hidden: true });
+    }
+    
+    const now = new Date();
+    const lastActivity = new Date(user.lastActivity);
+    const diffMs = now - lastActivity;
+    const diffMins = Math.floor(diffMs / 60000);
+    
+    if (diffMins < 5) {
+      return res.json({ lastSeen: 'online', online: true });
+    }
+    
+    res.json({ 
+      lastSeen: diffMins,
+      online: false
+    });
+  } catch (error) {
+    res.status(500).json({ success: false });
   }
 });
 
@@ -1422,6 +2294,22 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       const body = getPushText('completed', 'body', lang, { amount: ownerEarnings.toString() });
       sendPushNotification(owner.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
     }
+    
+    // Обновляем статистику пользователей
+    await User.findByIdAndUpdate(parking.ownerId, { $inc: { parkingsGiven: 1 } });
+    await User.findByIdAndUpdate(parking.bookedBy, { $inc: { parkingsReceived: 1 } });
+    
+    // Обновляем exchangeCount в Friendship если они друзья
+    await Friendship.updateOne(
+      {
+        $or: [
+          { user1: parking.ownerId, user2: parking.bookedBy },
+          { user1: parking.bookedBy, user2: parking.ownerId }
+        ],
+        status: 'accepted'
+      },
+      { $inc: { exchangeCount: 1 } }
+    );
     
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {

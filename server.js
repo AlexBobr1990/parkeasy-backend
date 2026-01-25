@@ -1439,11 +1439,13 @@ app.get('/api/users/:id/friend-requests', async (req, res) => {
   try {
     const userId = req.params.id;
     
-    // Ищем все pending запросы где текущий юзер НЕ инициатор
+    // Ищем все pending запросы где текущий юзер участник, но НЕ инициатор
     const requests = await Friendship.find({
+      status: 'pending',
+      initiatedBy: { $ne: userId },
       $or: [
-        { user1: userId, status: 'pending', initiatedBy: { $ne: userId } },
-        { user2: userId, status: 'pending', initiatedBy: { $ne: userId } }
+        { user1: userId },
+        { user2: userId }
       ]
     }).populate('user1', 'name avatar rating ratingCount')
       .populate('user2', 'name avatar rating ratingCount')

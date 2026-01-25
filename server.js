@@ -1280,7 +1280,15 @@ app.get('/api/users/search-by-email/:email', async (req, res) => {
 app.post('/api/friends/request', async (req, res) => {
   try {
     const { fromUserId, toUserId } = req.body;
-    console.log("FRIEND REQUEST from:", fromUserId, "to:", toUserId);
+    console.log("=== FRIEND REQUEST ===");
+    console.log("Body:", JSON.stringify(req.body));
+    console.log("fromUserId:", fromUserId, "type:", typeof fromUserId);
+    console.log("toUserId:", toUserId, "type:", typeof toUserId);
+    
+    if (!fromUserId || !toUserId) {
+      console.log("MISSING IDS");
+      return res.status(400).json({ success: false, message: 'Missing user IDs' });
+    }
     
     // Проверяем блокировку
     const blocked = await BlockedUser.findOne({
@@ -1298,10 +1306,11 @@ app.post('/api/friends/request', async (req, res) => {
     const user = await User.findById(fromUserId);
     const targetUser = await User.findById(toUserId);
     
-    console.log("User found:", !!user, "Target found:", !!targetUser);
+    console.log("User found:", !!user, user?._id);
+    console.log("Target found:", !!targetUser, targetUser?._id);
     
     if (!user || !targetUser) {
-      console.log("USER NOT FOUND");
+      console.log("USER NOT FOUND - fromUserId:", fromUserId, "toUserId:", toUserId);
       return res.status(400).json({ success: false, message: 'User not found' });
     }
     

@@ -1295,7 +1295,7 @@ app.post('/api/friends/request', async (req, res) => {
     const targetUser = await User.findById(toUserId);
     
     if (user.referredBy?.toString() === toUserId || targetUser.referredBy?.toString() === fromUserId) {
-      return res.json({ success: true, message: 'Already friends via referral' });
+      return res.json({ success: false, message: 'Already friends via referral' });
     }
     
     // Проверяем существует ли уже дружба или запрос
@@ -1308,7 +1308,7 @@ app.post('/api/friends/request', async (req, res) => {
     
     if (existingFriendship) {
       if (existingFriendship.status === 'accepted') {
-        return res.json({ success: true, message: 'Already friends' });
+        return res.json({ success: false, message: 'Already friends' });
       }
       
       // Если есть pending запрос ОТ ДРУГОГО пользователя - автоматически принимаем!
@@ -1439,22 +1439,16 @@ app.get('/api/users/:id/friend-requests', async (req, res) => {
   try {
     const userId = req.params.id;
     
-    // Ищем все pending запросы где текущий юзер участник, но НЕ инициатор
+    // user2 - это всегда получатель запроса
     const requests = await Friendship.find({
-      status: 'pending',
-      initiatedBy: { $ne: userId },
-      $or: [
-        { user1: userId },
-        { user2: userId }
-      ]
-    }).populate('user1', 'name avatar rating ratingCount')
-      .populate('user2', 'name avatar rating ratingCount')
-      .populate('initiatedBy', 'name avatar rating ratingCount');
+      user2: userId,
+      status: 'pending'
+    }).populate('user1', 'name avatar rating ratingCount');
     
-    // Возвращаем инициатора запроса
+    // user1 - это отправитель
     res.json(requests.map(r => ({
       friendshipId: r._id,
-      user: r.initiatedBy,
+      user: r.user1,
       createdAt: r.createdAt
     })));
   } catch (error) {
@@ -1468,17 +1462,16 @@ app.get('/api/users/:id/outgoing-requests', async (req, res) => {
   try {
     const userId = req.params.id;
     
-    // Ищем все pending запросы где текущий юзер - инициатор
+    // user1 - это всегда отправитель запроса
     const requests = await Friendship.find({
-      status: 'pending',
-      initiatedBy: userId
-    }).populate('user1', 'name avatar rating ratingCount')
-      .populate('user2', 'name avatar rating ratingCount');
+      user1: userId,
+      status: 'pending'
+    }).populate('user2', 'name avatar rating ratingCount');
     
-    // Возвращаем того кому отправлен запрос (не инициатору)
+    // user2 - это получатель
     res.json(requests.map(r => ({
       friendshipId: r._id,
-      user: r.user1._id.toString() === userId ? r.user2 : r.user1,
+      user: r.user2,
       createdAt: r.createdAt
     })));
   } catch (error) {

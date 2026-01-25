@@ -587,6 +587,44 @@ app.get('/api/referral/check/:code', async (req, res) => {
 
 // ==================== FRIENDS SYSTEM ====================
 
+// Проверить являются ли пользователи друзьями
+app.get('/api/friends/check/:userId1/:userId2', async (req, res) => {
+  try {
+    const { userId1, userId2 } = req.params;
+    
+    // Проверяем через рефералы
+    const user1 = await User.findById(userId1);
+    const user2 = await User.findById(userId2);
+    
+    if (!user1 || !user2) {
+      return res.json({ areFriends: false });
+    }
+    
+    // Друзья через рефералы?
+    if (user1.referredBy?.toString() === userId2 || user2.referredBy?.toString() === userId1) {
+      return res.json({ areFriends: true, via: 'referral' });
+    }
+    
+    // Друзья через Friendship?
+    const friendship = await Friendship.findOne({
+      $or: [
+        { user1: userId1, user2: userId2 },
+        { user1: userId2, user2: userId1 }
+      ],
+      status: 'accepted'
+    });
+    
+    if (friendship) {
+      return res.json({ areFriends: true, via: 'friendship' });
+    }
+    
+    res.json({ areFriends: false });
+  } catch (error) {
+    console.log("CHECK FRIENDSHIP ERROR:", error);
+    res.json({ areFriends: false });
+  }
+});
+
 // Получить список друзей (рефералы + Friendship)
 app.get('/api/users/:id/friends', async (req, res) => {
   try {

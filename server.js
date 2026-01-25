@@ -1461,6 +1461,30 @@ app.get('/api/users/:id/friend-requests', async (req, res) => {
   }
 });
 
+// Получить исходящие запросы на дружбу (которые я отправил)
+app.get('/api/users/:id/outgoing-requests', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    
+    // Ищем все pending запросы где текущий юзер - инициатор
+    const requests = await Friendship.find({
+      status: 'pending',
+      initiatedBy: userId
+    }).populate('user1', 'name avatar rating ratingCount')
+      .populate('user2', 'name avatar rating ratingCount');
+    
+    // Возвращаем того кому отправлен запрос
+    res.json(requests.map(r => ({
+      friendshipId: r._id,
+      user: r.user1.toString() === userId ? r.user2 : r.user1,
+      createdAt: r.createdAt
+    })));
+  } catch (error) {
+    console.log("GET OUTGOING REQUESTS ERROR:", error);
+    res.json([]);
+  }
+});
+
 // Удалить из друзей
 app.delete('/api/friends/:friendshipId', async (req, res) => {
   try {

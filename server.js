@@ -1247,6 +1247,24 @@ app.get('/api/users/is-muted/:userId/:targetId', async (req, res) => {
   }
 });
 
+// Поиск пользователя по email
+app.get('/api/users/search-by-email/:email', async (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email).toLowerCase();
+    
+    const user = await User.findOne({ email }).select('_id name email avatar');
+    
+    if (user) {
+      res.json({ success: true, user });
+    } else {
+      res.json({ success: false, message: 'User not found' });
+    }
+  } catch (error) {
+    console.log("SEARCH BY EMAIL ERROR:", error);
+    res.json({ success: false });
+  }
+});
+
 // Отправить запрос на дружбу (после успешного обмена)
 app.post('/api/friends/request', async (req, res) => {
   try {

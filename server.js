@@ -266,6 +266,15 @@ const blockedUserSchema = new mongoose.Schema({
 const Friendship = mongoose.model('Friendship', friendshipSchema);
 const BlockedUser = mongoose.model('BlockedUser', blockedUserSchema);
 
+// Заглушенные пользователи (не получают пуш от них)
+const mutedUserSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  mutedUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const MutedUser = mongoose.model('MutedUser', mutedUserSchema);
+
 const helpRequestSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   location: {
@@ -768,32 +777,51 @@ app.post('/api/friends/message', async (req, res) => {
   try {
     const { fromUserId, toUserId, text } = req.body;
     
+    // Проверяем блокировку
+    const blocked = await BlockedUser.findOne({
+      $or: [
+        { userId: fromUserId, blockedUserId: toUserId },
+        { userId: toUserId, blockedUserId: fromUserId }
+      ]
+    });
+    if (blocked) {
+      return res.status(403).json({ success: false, message: 'User is blocked' });
+    }
+    
     const message = new FriendMessage({ fromUserId, toUserId, text });
     await message.save();
     
-    // Отправляем push уведомление
-    const recipient = await User.findById(toUserId);
-    const sender = await User.findById(fromUserId);
+    // Проверяем mute перед отправкой push
+    const muted = await MutedUser.findOne({
+      userId: toUserId,
+      mutedUserId: fromUserId
+    });
     
-    if (recipient && recipient.pushToken) {
-      const lang = recipient.language || 'en';
-      const titles = {
-        en: '💬 New message',
-        ru: '💬 Новое сообщение',
-        es: '💬 Nuevo mensaje',
-        uk: '💬 Нове повідомлення'
-      };
-      const bodies = {
-        en: `${sender?.name || 'Friend'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-        ru: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-        es: `${sender?.name || 'Amigo'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-        uk: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`
-      };
+    // Отправляем push уведомление только если не заглушен
+    if (!muted) {
+      const recipient = await User.findById(toUserId);
+      const sender = await User.findById(fromUserId);
       
-      sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
-        type: 'friend_message',
-        fromUserId: fromUserId.toString()
-      });
+      if (recipient && recipient.pushToken) {
+        const lang = recipient.language || 'en';
+        const titles = {
+          en: '💬 New message',
+          ru: '💬 Новое сообщение',
+          es: '💬 Nuevo mensaje',
+          uk: '💬 Нове повідомлення'
+        };
+        const bodies = {
+          en: `${sender?.name || 'Friend'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+          ru: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+          es: `${sender?.name || 'Amigo'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+          uk: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`
+        };
+        
+        sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+          type: 'friend_message',
+          fromUserId: fromUserId.toString()
+        });
+      }
     }
     
     res.json({ success: true, message });
@@ -1176,6 +1204,49 @@ app.get('/api/users/is-blocked/:userId/:targetId', async (req, res) => {
   }
 });
 
+// ==================== MUTE ====================
+
+// Заглушить пользователя
+app.post('/api/users/mute', async (req, res) => {
+  try {
+    const { userId, mutedUserId } = req.body;
+    
+    const existing = await MutedUser.findOne({ userId, mutedUserId });
+    if (existing) return res.json({ success: true, message: 'Already muted' });
+    
+    const mute = new MutedUser({ userId, mutedUserId });
+    await mute.save();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("MUTE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Снять заглушку
+app.delete('/api/users/unmute/:userId/:mutedUserId', async (req, res) => {
+  try {
+    const { userId, mutedUserId } = req.params;
+    await MutedUser.deleteOne({ userId, mutedUserId });
+    res.json({ success: true });
+  } catch (error) {
+    console.log("UNMUTE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Проверить заглушен ли пользователь
+app.get('/api/users/is-muted/:userId/:targetId', async (req, res) => {
+  try {
+    const { userId, targetId } = req.params;
+    const muted = await MutedUser.findOne({ userId, mutedUserId: targetId });
+    res.json({ muted: !!muted });
+  } catch (error) {
+    res.json({ muted: false });
+  }
+});
+
 // Отправить запрос на дружбу (после успешного обмена)
 app.post('/api/friends/request', async (req, res) => {
   try {
@@ -1190,7 +1261,15 @@ app.post('/api/friends/request', async (req, res) => {
     });
     if (blocked) return res.status(400).json({ success: false, message: 'User is blocked' });
     
-    // Проверяем существует ли уже дружба
+    // Проверяем не друзья ли они уже через рефералы
+    const user = await User.findById(fromUserId);
+    const targetUser = await User.findById(toUserId);
+    
+    if (user.referredBy?.toString() === toUserId || targetUser.referredBy?.toString() === fromUserId) {
+      return res.json({ success: true, message: 'Already friends via referral' });
+    }
+    
+    // Проверяем существует ли уже дружба или запрос
     const existingFriendship = await Friendship.findOne({
       $or: [
         { user1: fromUserId, user2: toUserId },
@@ -1202,20 +1281,44 @@ app.post('/api/friends/request', async (req, res) => {
       if (existingFriendship.status === 'accepted') {
         return res.json({ success: true, message: 'Already friends' });
       }
+      
+      // Если есть pending запрос ОТ ДРУГОГО пользователя - автоматически принимаем!
+      if (existingFriendship.status === 'pending' && existingFriendship.initiatedBy.toString() === toUserId) {
+        existingFriendship.status = 'accepted';
+        await existingFriendship.save();
+        
+        // Push обоим что теперь друзья
+        const lang1 = user.language || 'en';
+        const lang2 = targetUser.language || 'en';
+        
+        const titles = {
+          en: '🎉 New friend!',
+          ru: '🎉 Новый друг!',
+          es: '🎉 ¡Nuevo amigo!',
+          uk: '🎉 Новий друг!'
+        };
+        
+        if (user.pushToken) {
+          sendPushNotification(user.pushToken, titles[lang1] || titles.en, 
+            `${targetUser.name} - ${lang1 === 'ru' ? 'теперь ваш друг!' : lang1 === 'uk' ? 'тепер ваш друг!' : 'is now your friend!'}`,
+            { type: 'friend_accepted' });
+        }
+        if (targetUser.pushToken) {
+          sendPushNotification(targetUser.pushToken, titles[lang2] || titles.en,
+            `${user.name} - ${lang2 === 'ru' ? 'теперь ваш друг!' : lang2 === 'uk' ? 'тепер ваш друг!' : 'is now your friend!'}`,
+            { type: 'friend_accepted' });
+        }
+        
+        return res.json({ success: true, message: 'Now friends', autoAccepted: true });
+      }
+      
+      // Если pending запрос от меня - уже отправлен
       if (existingFriendship.status === 'pending') {
         return res.json({ success: true, message: 'Request already sent' });
       }
     }
     
-    // Проверяем не друзья ли они уже через рефералы
-    const user = await User.findById(fromUserId);
-    const targetUser = await User.findById(toUserId);
-    
-    if (user.referredBy?.toString() === toUserId || targetUser.referredBy?.toString() === fromUserId) {
-      return res.json({ success: true, message: 'Already friends via referral' });
-    }
-    
-    // Создаём запрос на дружбу
+    // Создаём новый запрос на дружбу
     const friendship = new Friendship({
       user1: fromUserId,
       user2: toUserId,

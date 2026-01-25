@@ -1280,6 +1280,7 @@ app.get('/api/users/search-by-email/:email', async (req, res) => {
 app.post('/api/friends/request', async (req, res) => {
   try {
     const { fromUserId, toUserId } = req.body;
+    console.log("FRIEND REQUEST from:", fromUserId, "to:", toUserId);
     
     // Проверяем блокировку
     const blocked = await BlockedUser.findOne({
@@ -1288,13 +1289,24 @@ app.post('/api/friends/request', async (req, res) => {
         { userId: toUserId, blockedUserId: fromUserId }
       ]
     });
-    if (blocked) return res.status(400).json({ success: false, message: 'User is blocked' });
+    if (blocked) {
+      console.log("BLOCKED");
+      return res.status(400).json({ success: false, message: 'User is blocked' });
+    }
     
     // Проверяем не друзья ли они уже через рефералы
     const user = await User.findById(fromUserId);
     const targetUser = await User.findById(toUserId);
     
+    console.log("User found:", !!user, "Target found:", !!targetUser);
+    
+    if (!user || !targetUser) {
+      console.log("USER NOT FOUND");
+      return res.status(400).json({ success: false, message: 'User not found' });
+    }
+    
     if (user.referredBy?.toString() === toUserId || targetUser.referredBy?.toString() === fromUserId) {
+      console.log("ALREADY FRIENDS VIA REFERRAL");
       return res.json({ success: false, message: 'Already friends via referral' });
     }
     
@@ -1306,13 +1318,16 @@ app.post('/api/friends/request', async (req, res) => {
       ]
     });
     
+    console.log("Existing friendship:", existingFriendship);
+    
     if (existingFriendship) {
       if (existingFriendship.status === 'accepted') {
         return res.json({ success: false, message: 'Already friends' });
       }
       
       // Если есть pending запрос ОТ ДРУГОГО пользователя - автоматически принимаем!
-      if (existingFriendship.status === 'pending' && existingFriendship.initiatedBy.toString() === toUserId) {
+      if (existingFriendship.status === 'pending' && existingFriendship.user1.toString() === toUserId) {
+        console.log("AUTO ACCEPTING - other user sent request first");
         existingFriendship.status = 'accepted';
         await existingFriendship.save();
         
@@ -1343,11 +1358,13 @@ app.post('/api/friends/request', async (req, res) => {
       
       // Если pending запрос от меня - уже отправлен
       if (existingFriendship.status === 'pending') {
+        console.log("REQUEST ALREADY SENT");
         return res.json({ success: false, message: 'Request already sent' });
       }
     }
     
     // Создаём новый запрос на дружбу
+    console.log("CREATING NEW FRIENDSHIP");
     const friendship = new Friendship({
       user1: fromUserId,
       user2: toUserId,
@@ -1355,6 +1372,7 @@ app.post('/api/friends/request', async (req, res) => {
       initiatedBy: fromUserId
     });
     await friendship.save();
+    console.log("FRIENDSHIP SAVED:", friendship._id);
     
     // Push уведомление
     if (targetUser && targetUser.pushToken) {
@@ -1382,7 +1400,7 @@ app.post('/api/friends/request', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.log("FRIEND REQUEST ERROR:", error);
-    res.status(500).json({ success: false });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -1438,12 +1456,15 @@ app.post('/api/friends/respond', async (req, res) => {
 app.get('/api/users/:id/friend-requests', async (req, res) => {
   try {
     const userId = req.params.id;
+    console.log("GET FRIEND REQUESTS for userId:", userId);
     
     // user2 - это всегда получатель запроса
     const requests = await Friendship.find({
       user2: userId,
       status: 'pending'
     }).populate('user1', 'name avatar rating ratingCount');
+    
+    console.log("Found requests:", requests.length, requests.map(r => ({ id: r._id, user1: r.user1?._id, user2: r.user2 })));
     
     // user1 - это отправитель
     res.json(requests.map(r => ({

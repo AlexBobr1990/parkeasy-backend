@@ -614,17 +614,21 @@ app.get('/api/friends/check/:userId1/:userId2', async (req, res) => {
       return res.json({ areFriends: true, via: 'referral' });
     }
     
-    // Друзья через Friendship?
+    // Проверяем Friendship (любой статус)
     const friendship = await Friendship.findOne({
       $or: [
         { user1: userId1, user2: userId2 },
         { user1: userId2, user2: userId1 }
-      ],
-      status: 'accepted'
+      ]
     });
     
     if (friendship) {
-      return res.json({ areFriends: true, via: 'friendship' });
+      if (friendship.status === 'accepted') {
+        return res.json({ areFriends: true, via: 'friendship' });
+      }
+      if (friendship.status === 'pending') {
+        return res.json({ areFriends: false, pendingRequest: true });
+      }
     }
     
     res.json({ areFriends: false });

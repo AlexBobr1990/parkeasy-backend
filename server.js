@@ -627,7 +627,14 @@ app.get('/api/friends/check/:userId1/:userId2', async (req, res) => {
         return res.json({ areFriends: true, via: 'friendship' });
       }
       if (friendship.status === 'pending') {
-        return res.json({ areFriends: false, pendingRequest: true });
+        // Кто инициатор запроса?
+        const iAmInitiator = friendship.initiatedBy?.toString() === userId1;
+        return res.json({ 
+          areFriends: false, 
+          pendingRequest: true,
+          iAmInitiator,
+          friendshipId: friendship._id
+        });
       }
     }
     
@@ -1336,7 +1343,7 @@ app.post('/api/friends/request', async (req, res) => {
       
       // Если pending запрос от меня - уже отправлен
       if (existingFriendship.status === 'pending') {
-        return res.json({ success: true, message: 'Request already sent' });
+        return res.json({ success: false, message: 'Request already sent' });
       }
     }
     
@@ -1432,17 +1439,24 @@ app.get('/api/users/:id/friend-requests', async (req, res) => {
   try {
     const userId = req.params.id;
     
+    // Ищем все pending запросы где текущий юзер НЕ инициатор
     const requests = await Friendship.find({
-      user2: userId,
-      status: 'pending'
-    }).populate('user1', 'name avatar rating ratingCount');
+      $or: [
+        { user1: userId, status: 'pending', initiatedBy: { $ne: userId } },
+        { user2: userId, status: 'pending', initiatedBy: { $ne: userId } }
+      ]
+    }).populate('user1', 'name avatar rating ratingCount')
+      .populate('user2', 'name avatar rating ratingCount')
+      .populate('initiatedBy', 'name avatar rating ratingCount');
     
+    // Возвращаем инициатора запроса
     res.json(requests.map(r => ({
       friendshipId: r._id,
-      user: r.user1,
+      user: r.initiatedBy,
       createdAt: r.createdAt
     })));
   } catch (error) {
+    console.log("GET FRIEND REQUESTS ERROR:", error);
     res.json([]);
   }
 });

@@ -1473,10 +1473,10 @@ app.get('/api/users/:id/outgoing-requests', async (req, res) => {
     }).populate('user1', 'name avatar rating ratingCount')
       .populate('user2', 'name avatar rating ratingCount');
     
-    // Возвращаем того кому отправлен запрос
+    // Возвращаем того кому отправлен запрос (не инициатору)
     res.json(requests.map(r => ({
       friendshipId: r._id,
-      user: r.user1.toString() === userId ? r.user2 : r.user1,
+      user: r.user1._id.toString() === userId ? r.user2 : r.user1,
       createdAt: r.createdAt
     })));
   } catch (error) {

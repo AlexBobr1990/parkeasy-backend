@@ -57,6 +57,19 @@ const getPushText = (type, field, lang, vars = {}) => {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ==================== TIMING LOGGER ====================
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    // Логируем только медленные запросы (> 500ms) и ключевые endpoints
+    if (duration > 500 || req.path.includes('/friends') || req.path.includes('/level') || req.path.includes('/stats') || req.path.includes('/daily-tasks')) {
+      console.log(`⏱️ ${req.method} ${req.path} - ${duration}ms`);
+    }
+  });
+  next();
+});
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
@@ -922,11 +935,14 @@ app.get('/api/users/:id/friends', async (req, res) => {
 
 // ОПТИМИЗИРОВАННЫЙ COMBINED ENDPOINT - всё за один запрос!
 app.get('/api/users/:id/friends-all', async (req, res) => {
+  const t0 = Date.now();
   try {
     const userId = req.params.id;
     const user = await User.findById(userId);
+    console.log(`  [friends-all] User.findById: ${Date.now() - t0}ms`);
     if (!user) return res.json({ friends: [], friendRequests: [], outgoingRequests: [], blockedUsers: [], stats: null });
     
+    const t1 = Date.now();
     // Все запросы параллельно
     const [
       blockedUsers,
@@ -943,6 +959,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       User.find({ referredBy: userId }).select('name avatar lastActivity hideOnline rating ratingCount pushToken'),
       user.referredBy ? User.findById(user.referredBy).select('name avatar lastActivity hideOnline rating ratingCount pushToken') : null
     ]);
+    console.log(`  [friends-all] Promise.all 6 queries: ${Date.now() - t1}ms`);
     
     const blockedIds = blockedUsers.map(b => b.userId.toString() === userId ? b.blockedUserId.toString() : b.userId.toString());
     
@@ -951,9 +968,11 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       .map(f => f.user1.toString() === userId ? f.user2 : f.user1)
       .filter(id => !blockedIds.includes(id.toString()));
     
+    const t2 = Date.now();
     // Один запрос для всех друзей из Friendship
     const friendshipUsers = await User.find({ _id: { $in: friendshipFriendIds } })
       .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    console.log(`  [friends-all] User.find friends: ${Date.now() - t2}ms`);
     
     const usersMap = {};
     friendshipUsers.forEach(u => { usersMap[u._id.toString()] = u; });
@@ -3177,16 +3196,23 @@ const getTodayDate = () => new Date().toISOString().split('T')[0];
 
 // Получить уровень пользователя
 app.get('/api/users/:id/level', async (req, res) => {
+  const t0 = Date.now();
   try {
     const user = await User.findById(req.params.id);
+    console.log(`  [level] User.findById: ${Date.now() - t0}ms`);
     if (!user) return res.json({ level: 1, progress: 0 });
     
+    const t1 = Date.now();
     const settings = await getGameSettings();
+    console.log(`  [level] getGameSettings: ${Date.now() - t1}ms`);
     if (!settings || !settings.levels) {
       return res.json({ level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', progress: 0 });
     }
     
+    const t2 = Date.now();
     const parkingsGiven = await Parking.countDocuments({ ownerId: req.params.id, status: 'completed' });
+    console.log(`  [level] Parking.countDocuments: ${Date.now() - t2}ms`);
+    console.log(`  [level] TOTAL: ${Date.now() - t0}ms`);
     const totalPoints = user.totalPointsEarned || user.balance || 0;
     
     let currentLevel = settings.levels[0];

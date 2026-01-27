@@ -2630,7 +2630,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     // Owner - give_parking
     const ownerProgress = await UserDailyProgress.findOne({ userId: parking.ownerId, date: today });
     if (ownerProgress) {
-      const giveTask = ownerProgress.tasks.find(t => t.code === 'give_parking');
+      const giveTask = ownerProgress.tasks.find(t => t.code === 'give_parking' || t.type === 'give_parking');
       if (giveTask && !giveTask.completed) {
         giveTask.currentValue += 1;
         if (giveTask.currentValue >= 1) giveTask.completed = true;
@@ -2641,7 +2641,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     // Booker - receive_parking
     const bookerProgress = await UserDailyProgress.findOne({ userId: parking.bookedBy, date: today });
     if (bookerProgress) {
-      const receiveTask = bookerProgress.tasks.find(t => t.code === 'receive_parking');
+      const receiveTask = bookerProgress.tasks.find(t => t.code === 'receive_parking' || t.type === 'receive_parking');
       if (receiveTask && !receiveTask.completed) {
         receiveTask.currentValue += 1;
         if (receiveTask.currentValue >= 1) receiveTask.completed = true;
@@ -3062,7 +3062,7 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
       await streak.save();
       
       // Отмечаем login задание
-      const loginTask = progress.tasks.find(t => t.code === 'daily_login');
+      const loginTask = progress.tasks.find(t => t.code === 'daily_login' || t.code === 'login' || t.type === 'login');
       if (loginTask) {
         loginTask.currentValue = 1;
         loginTask.completed = true;
@@ -3227,6 +3227,26 @@ app.get('/api/users/:id/achievements', async (req, res) => {
     res.json(achievements);
   } catch (error) {
     res.json([]);
+  }
+});
+
+// Пересоздать конфиг заданий (для исправления)
+app.post('/api/admin/reset-tasks', async (req, res) => {
+  try {
+    await DailyTaskConfig.deleteMany({});
+    await UserDailyProgress.deleteMany({});
+    
+    await DailyTaskConfig.insertMany([
+      { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
+      { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
+      { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход' }, type: 'login', targetValue: 1, reward: 5 }
+    ]);
+    
+    console.log('✅ Tasks reset');
+    res.json({ success: true, message: 'Tasks reset' });
+  } catch (error) {
+    console.log('Reset tasks error:', error);
+    res.json({ success: false });
   }
 });
 

@@ -920,6 +920,158 @@ app.get('/api/users/:id/friends', async (req, res) => {
   }
 });
 
+// ОПТИМИЗИРОВАННЫЙ COMBINED ENDPOINT - всё за один запрос!
+app.get('/api/users/:id/friends-all', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId);
+    if (!user) return res.json({ friends: [], friendRequests: [], outgoingRequests: [], blockedUsers: [], stats: null });
+    
+    // Все запросы параллельно
+    const [
+      blockedUsers,
+      friendships,
+      pendingIncoming,
+      pendingOutgoing,
+      friendsWhoUsedMyCode,
+      myReferrer
+    ] = await Promise.all([
+      BlockedUser.find({ $or: [{ userId }, { blockedUserId: userId }] }),
+      Friendship.find({ $or: [{ user1: userId }, { user2: userId }], status: 'accepted' }),
+      Friendship.find({ user2: userId, status: 'pending' }).populate('user1', 'name avatar rating ratingCount'),
+      Friendship.find({ user1: userId, status: 'pending' }).populate('user2', 'name avatar rating ratingCount'),
+      User.find({ referredBy: userId }).select('name avatar lastActivity hideOnline rating ratingCount pushToken'),
+      user.referredBy ? User.findById(user.referredBy).select('name avatar lastActivity hideOnline rating ratingCount pushToken') : null
+    ]);
+    
+    const blockedIds = blockedUsers.map(b => b.userId.toString() === userId ? b.blockedUserId.toString() : b.userId.toString());
+    
+    // Собираем ID друзей из Friendship
+    const friendshipFriendIds = friendships
+      .map(f => f.user1.toString() === userId ? f.user2 : f.user1)
+      .filter(id => !blockedIds.includes(id.toString()));
+    
+    // Один запрос для всех друзей из Friendship
+    const friendshipUsers = await User.find({ _id: { $in: friendshipFriendIds } })
+      .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    
+    const usersMap = {};
+    friendshipUsers.forEach(u => { usersMap[u._id.toString()] = u; });
+    
+    // Собираем всех друзей
+    const allFriendsRaw = [];
+    
+    if (myReferrer && !blockedIds.includes(myReferrer._id.toString())) {
+      allFriendsRaw.push({ user: myReferrer, isReferral: true, isMyReferrer: true });
+    }
+    
+    for (const f of friendsWhoUsedMyCode) {
+      if (!blockedIds.includes(f._id.toString())) {
+        allFriendsRaw.push({ user: f, isReferral: true, usedMyCode: true });
+      }
+    }
+    
+    for (const f of friendships) {
+      const friendId = f.user1.toString() === userId ? f.user2 : f.user1;
+      if (blockedIds.includes(friendId.toString())) continue;
+      
+      const friendUser = usersMap[friendId.toString()];
+      if (friendUser) {
+        const exists = allFriendsRaw.find(fr => fr.user._id.toString() === friendUser._id.toString());
+        if (!exists) {
+          const isFavorite = f.user1.toString() === userId ? f.favorite1 : f.favorite2;
+          allFriendsRaw.push({ user: friendUser, isFavorite, friendshipId: f._id, exchangeCount: f.exchangeCount || 0 });
+        } else {
+          exists.isFavorite = f.user1.toString() === userId ? f.favorite1 : f.favorite2;
+          exists.friendshipId = f._id;
+          exists.exchangeCount = f.exchangeCount || 0;
+        }
+      }
+    }
+    
+    // Непрочитанные сообщения - один агрегатный запрос
+    const allFriendIds = allFriendsRaw.map(f => f.user._id);
+    const unreadCounts = await FriendMessage.aggregate([
+      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false } },
+      { $group: { _id: '$fromUserId', count: { $sum: 1 } } }
+    ]);
+    const unreadMap = {};
+    unreadCounts.forEach(u => { unreadMap[u._id.toString()] = u.count; });
+    
+    // Формируем список друзей с онлайн статусом
+    const now = new Date();
+    const friends = allFriendsRaw.map(friendData => {
+      const friend = friendData.user;
+      const lastActivity = new Date(friend.lastActivity);
+      const diffMins = Math.floor((now - lastActivity) / 60000);
+      const isOnline = friend.hideOnline ? false : diffMins < 5;
+      
+      let lastSeenText = null;
+      if (!friend.hideOnline && !isOnline) {
+        if (diffMins < 60) lastSeenText = `${diffMins}m`;
+        else if (diffMins < 1440) lastSeenText = `${Math.floor(diffMins / 60)}h`;
+        else lastSeenText = `${Math.floor(diffMins / 1440)}d`;
+      }
+      
+      return {
+        id: friend._id, _id: friend._id, name: friend.name, avatar: friend.avatar,
+        rating: friend.rating, ratingCount: friend.ratingCount, isOnline, lastSeenText,
+        unreadCount: unreadMap[friend._id.toString()] || 0,
+        isFavorite: friendData.isFavorite || false, friendshipId: friendData.friendshipId || null,
+        isReferral: friendData.isReferral || false, exchangeCount: friendData.exchangeCount || 0
+      };
+    });
+    
+    // Сортировка
+    friends.sort((a, b) => {
+      if (a.isFavorite && !b.isFavorite) return -1;
+      if (!a.isFavorite && b.isFavorite) return 1;
+      if (a.isOnline && !b.isOnline) return -1;
+      if (!a.isOnline && b.isOnline) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    // Формируем запросы
+    const friendRequests = pendingIncoming
+      .filter(r => r.user1 && !blockedIds.includes(r.user1._id.toString()))
+      .map(r => ({ friendshipId: r._id, user: r.user1, createdAt: r.createdAt }));
+    
+    const outgoingRequests = pendingOutgoing
+      .filter(r => r.user2 && !blockedIds.includes(r.user2._id.toString()))
+      .map(r => ({ friendshipId: r._id, user: r.user2, createdAt: r.createdAt }));
+    
+    // Статистика
+    const achievements = [];
+    if (user.parkingsGiven >= 1) achievements.push({ id: 'first_give', name: 'First Give', emoji: '🌱' });
+    if (user.parkingsGiven >= 10) achievements.push({ id: 'helper', name: 'Helper', emoji: '🤝' });
+    if (user.parkingsGiven >= 50) achievements.push({ id: 'generous', name: 'Generous', emoji: '💝' });
+    if (user.parkingsGiven >= 100) achievements.push({ id: 'legend', name: 'Legend', emoji: '🏆' });
+    if (user.parkingsReceived >= 1) achievements.push({ id: 'first_park', name: 'First Park', emoji: '🚗' });
+    if (user.parkingsReceived >= 25) achievements.push({ id: 'regular', name: 'Regular', emoji: '⭐' });
+    if (user.rating >= 4.8 && user.ratingCount >= 10) achievements.push({ id: 'trusted', name: 'Trusted', emoji: '💎' });
+    if (user.referralCount >= 5) achievements.push({ id: 'networker', name: 'Networker', emoji: '🌐' });
+    if (user.referralCount >= 20) achievements.push({ id: 'influencer', name: 'Influencer', emoji: '👑' });
+    
+    const stats = {
+      parkingsGiven: user.parkingsGiven || 0,
+      parkingsReceived: user.parkingsReceived || 0,
+      rating: user.rating,
+      ratingCount: user.ratingCount,
+      referralCount: user.referralCount || 0,
+      achievements
+    };
+    
+    // Заблокированные (с данными пользователей)
+    const blockedUserIds = blockedUsers.filter(b => b.userId.toString() === userId).map(b => b.blockedUserId);
+    const blockedUsersData = await User.find({ _id: { $in: blockedUserIds } }).select('name avatar');
+    
+    res.json({ friends, friendRequests, outgoingRequests, blockedUsers: blockedUsersData, stats });
+  } catch (error) {
+    console.log("GET FRIENDS-ALL ERROR:", error);
+    res.json({ friends: [], friendRequests: [], outgoingRequests: [], blockedUsers: [], stats: null });
+  }
+});
+
 // Отправить сообщение другу
 app.post('/api/friends/message', async (req, res) => {
   try {

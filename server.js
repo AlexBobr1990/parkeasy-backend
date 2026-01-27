@@ -2624,6 +2624,31 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       { $inc: { exchangeCount: 1 } }
     );
     
+    // Обновляем прогресс заданий
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Owner - give_parking
+    const ownerProgress = await UserDailyProgress.findOne({ userId: parking.ownerId, date: today });
+    if (ownerProgress) {
+      const giveTask = ownerProgress.tasks.find(t => t.code === 'give_parking');
+      if (giveTask && !giveTask.completed) {
+        giveTask.currentValue += 1;
+        if (giveTask.currentValue >= 1) giveTask.completed = true;
+        await ownerProgress.save();
+      }
+    }
+    
+    // Booker - receive_parking
+    const bookerProgress = await UserDailyProgress.findOne({ userId: parking.bookedBy, date: today });
+    if (bookerProgress) {
+      const receiveTask = bookerProgress.tasks.find(t => t.code === 'receive_parking');
+      if (receiveTask && !receiveTask.completed) {
+        receiveTask.currentValue += 1;
+        if (receiveTask.currentValue >= 1) receiveTask.completed = true;
+        await bookerProgress.save();
+      }
+    }
+    
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);

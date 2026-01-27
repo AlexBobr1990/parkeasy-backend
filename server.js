@@ -314,7 +314,10 @@ const achievementConfigSchema = new mongoose.Schema({
   icon: String,
   name: { en: String, ru: String, es: String, uk: String },
   description: { en: String, ru: String, es: String, uk: String },
-  condition: { type: String, value: Number },
+  condition: {
+    conditionType: String,  // 'parkings_given', 'streak', etc
+    value: Number
+  },
   reward: { type: Number, default: 0 },
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
@@ -378,7 +381,7 @@ const seasonalEventSchema = new mongoose.Schema({
     code: String, icon: String,
     name: { en: String, ru: String, es: String, uk: String },
     description: { en: String, ru: String, es: String, uk: String },
-    condition: { type: String, value: Number },
+    condition: { conditionType: String, value: Number },
     reward: Number
   },
   createdAt: { type: Date, default: Date.now }
@@ -3098,7 +3101,7 @@ const checkAchievements = async (userId, triggerType = null) => {
     if (hasAchievement) continue;
     
     let unlocked = false;
-    const condType = config.condition?.type || config.condition;
+    const condType = config.condition?.conditionType || config.condition?.type || config.condition;
     const condValue = config.condition?.value || 0;
     
     switch (condType) {
@@ -3496,26 +3499,34 @@ app.delete('/api/admin/seasonal-events/:id', async (req, res) => {
 
 // Seed default game data
 const seedGameData = async () => {
-  const taskCount = await DailyTaskConfig.countDocuments();
-  if (taskCount === 0) {
-    await DailyTaskConfig.insertMany([
-      { code: 'give_parking_1', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку', es: 'Comparte lugar', uk: 'Віддай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
-      { code: 'receive_parking_1', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку', es: 'Consigue lugar', uk: 'Отримай парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
-      { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход', es: 'Entrada diaria', uk: 'Щоденний вхід' }, type: 'login', targetValue: 1, reward: 5 }
-    ]);
-    console.log('✅ Default daily tasks created');
+  try {
+    const taskCount = await DailyTaskConfig.countDocuments();
+    if (taskCount === 0) {
+      await DailyTaskConfig.insertMany([
+        { code: 'give_parking_1', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку', es: 'Comparte lugar', uk: 'Віддай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
+        { code: 'receive_parking_1', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку', es: 'Consigue lugar', uk: 'Отримай парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
+        { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход', es: 'Entrada diaria', uk: 'Щоденний вхід' }, type: 'login', targetValue: 1, reward: 5 }
+      ]);
+      console.log('✅ Default daily tasks created');
+    }
+  } catch (e) {
+    console.log('Daily tasks seed error:', e.message);
   }
   
-  const achCount = await AchievementConfig.countDocuments();
-  if (achCount === 0) {
-    await AchievementConfig.insertMany([
-      { code: 'night_driver', icon: '🌙', name: { en: 'Night Driver', ru: 'Ночной водитель' }, description: { en: '10 parkings after 10 PM', ru: '10 парковок после 22:00' }, condition: { type: 'parkings_given_night', value: 10 }, reward: 50 },
-      { code: 'early_bird', icon: '🌅', name: { en: 'Early Bird', ru: 'Ранняя пташка' }, description: { en: '10 parkings before 8 AM', ru: '10 парковок до 8:00' }, condition: { type: 'parkings_given_morning', value: 10 }, reward: 50 },
-      { code: 'streak_master', icon: '🔥', name: { en: 'Streak Master', ru: 'Мастер серий' }, description: { en: '7-day streak', ru: 'Серия 7 дней' }, condition: { type: 'streak', value: 7 }, reward: 50 },
-      { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP' }, description: { en: '50+ parkings given', ru: '50+ парковок отдано' }, condition: { type: 'parkings_given', value: 50 }, reward: 100 },
-      { code: 'five_stars', icon: '⭐', name: { en: '5 Stars', ru: '5 звёзд' }, description: { en: '5.0 rating with 10+ reviews', ru: 'Рейтинг 5.0 с 10+ оценками' }, condition: { type: 'rating', value: 5.0 }, reward: 50 }
-    ]);
-    console.log('✅ Default achievements created');
+  try {
+    const achCount = await AchievementConfig.countDocuments();
+    if (achCount === 0) {
+      await AchievementConfig.insertMany([
+        { code: 'night_driver', icon: '🌙', name: { en: 'Night Driver', ru: 'Ночной водитель' }, description: { en: '10 parkings after 10 PM', ru: '10 парковок после 22:00' }, condition: { conditionType: 'parkings_given_night', value: 10 }, reward: 50 },
+        { code: 'early_bird', icon: '🌅', name: { en: 'Early Bird', ru: 'Ранняя пташка' }, description: { en: '10 parkings before 8 AM', ru: '10 парковок до 8:00' }, condition: { conditionType: 'parkings_given_morning', value: 10 }, reward: 50 },
+        { code: 'streak_master', icon: '🔥', name: { en: 'Streak Master', ru: 'Мастер серий' }, description: { en: '7-day streak', ru: 'Серия 7 дней' }, condition: { conditionType: 'streak', value: 7 }, reward: 50 },
+        { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP' }, description: { en: '50+ parkings given', ru: '50+ парковок отдано' }, condition: { conditionType: 'parkings_given', value: 50 }, reward: 100 },
+        { code: 'five_stars', icon: '⭐', name: { en: '5 Stars', ru: '5 звёзд' }, description: { en: '5.0 rating with 10+ reviews', ru: 'Рейтинг 5.0 с 10+ оценками' }, condition: { conditionType: 'rating', value: 5.0 }, reward: 50 }
+      ]);
+      console.log('✅ Default achievements created');
+    }
+  } catch (e) {
+    console.log('Achievements seed error:', e.message);
   }
 };
 

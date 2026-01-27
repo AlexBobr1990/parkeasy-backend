@@ -3180,7 +3180,7 @@ app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
     
     const user = await User.findByIdAndUpdate(userId, { $inc: { balance: bonus, totalPointsEarned: bonus } }, { new: true });
     
-    await new Transaction({ userId, amount: bonus, type: 'daily_bonus', description: 'All daily tasks completed' }).save();
+    await new Transaction({ userId, amount: bonus, type: 'daily_task', description: 'All daily tasks completed' }).save();
     
     res.json({ success: true, bonus, newBalance: user.balance });
   } catch (error) {

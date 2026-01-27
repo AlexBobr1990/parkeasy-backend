@@ -2634,6 +2634,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       if (giveTask && !giveTask.completed) {
         giveTask.currentValue += 1;
         if (giveTask.currentValue >= 1) giveTask.completed = true;
+        ownerProgress.markModified('tasks');
         await ownerProgress.save();
       }
     }
@@ -2645,6 +2646,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       if (receiveTask && !receiveTask.completed) {
         receiveTask.currentValue += 1;
         if (receiveTask.currentValue >= 1) receiveTask.completed = true;
+        bookerProgress.markModified('tasks');
         await bookerProgress.save();
       }
     }
@@ -3066,6 +3068,7 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
       if (loginTask) {
         loginTask.currentValue = 1;
         loginTask.completed = true;
+        progress.markModified('tasks');
         await progress.save();
       }
     }
@@ -3142,6 +3145,7 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     const reward = config?.reward || 10;
     
     task.rewardClaimed = true;
+    progress.markModified('tasks');
     await progress.save();
     
     const user = await User.findByIdAndUpdate(userId, { $inc: { balance: reward, totalPointsEarned: reward } }, { new: true });
@@ -3151,8 +3155,8 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     console.log('SUCCESS: Claimed', reward, 'points');
     res.json({ success: true, reward, newBalance: user.balance });
   } catch (error) {
-    console.log('CLAIM ERROR:', error);
-    res.json({ success: false, reason: 'error' });
+    console.log('CLAIM ERROR:', error.message);
+    res.json({ success: false, reason: 'error', message: error.message });
   }
 });
 

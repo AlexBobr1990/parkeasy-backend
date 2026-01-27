@@ -3108,12 +3108,34 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     const { id: userId, taskCode } = req.params;
     const today = getTodayDate();
     
+    console.log('=== CLAIM TASK ===');
+    console.log('userId:', userId);
+    console.log('taskCode:', taskCode);
+    console.log('today:', today);
+    
     const progress = await UserDailyProgress.findOne({ userId, date: today });
-    if (!progress) return res.json({ success: false });
+    if (!progress) {
+      console.log('ERROR: No progress found for today');
+      return res.json({ success: false, reason: 'no_progress' });
+    }
+    
+    console.log('Progress tasks:', JSON.stringify(progress.tasks));
     
     const task = progress.tasks.find(t => t.code === taskCode);
-    if (!task || !task.completed || task.rewardClaimed) {
-      return res.json({ success: false });
+    if (!task) {
+      console.log('ERROR: Task not found. Looking for:', taskCode);
+      console.log('Available codes:', progress.tasks.map(t => t.code));
+      return res.json({ success: false, reason: 'task_not_found' });
+    }
+    
+    if (!task.completed) {
+      console.log('ERROR: Task not completed');
+      return res.json({ success: false, reason: 'not_completed' });
+    }
+    
+    if (task.rewardClaimed) {
+      console.log('ERROR: Already claimed');
+      return res.json({ success: false, reason: 'already_claimed' });
     }
     
     const config = await DailyTaskConfig.findOne({ code: taskCode });
@@ -3126,9 +3148,11 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     
     await new Transaction({ userId, amount: reward, type: 'daily_task', description: `Daily task: ${taskCode}` }).save();
     
+    console.log('SUCCESS: Claimed', reward, 'points');
     res.json({ success: true, reward, newBalance: user.balance });
   } catch (error) {
-    res.json({ success: false });
+    console.log('CLAIM ERROR:', error);
+    res.json({ success: false, reason: 'error' });
   }
 });
 

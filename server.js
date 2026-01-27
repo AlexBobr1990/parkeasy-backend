@@ -672,20 +672,32 @@ app.get('/api/users/:id/friends', async (req, res) => {
         .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
     }
     
-    // 2. Друзья через Friendship
+    // 2. Друзья через Friendship - ОПТИМИЗИРОВАНО
     const friendships = await Friendship.find({
       $or: [{ user1: userId }, { user2: userId }],
       status: 'accepted'
     });
+    
+    // Собираем все ID друзей за один раз
+    const friendshipFriendIds = friendships.map(f => 
+      f.user1.toString() === userId ? f.user2 : f.user1
+    ).filter(id => !blockedIds.includes(id.toString()));
+    
+    // Один запрос вместо N
+    const friendshipUsers = await User.find({ 
+      _id: { $in: friendshipFriendIds } 
+    }).select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    
+    // Создаем map для быстрого доступа
+    const usersMap = {};
+    friendshipUsers.forEach(u => { usersMap[u._id.toString()] = u; });
     
     const friendshipFriends = [];
     for (const f of friendships) {
       const friendId = f.user1.toString() === userId ? f.user2 : f.user1;
       if (blockedIds.includes(friendId.toString())) continue;
       
-      const friendUser = await User.findById(friendId)
-        .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
-      
+      const friendUser = usersMap[friendId.toString()];
       if (friendUser) {
         const isFavorite = f.user1.toString() === userId ? f.favorite1 : f.favorite2;
         friendshipFriends.push({ 
@@ -716,30 +728,34 @@ app.get('/api/users/:id/friends', async (req, res) => {
       if (!exists) {
         allFriendsRaw.push(f);
       } else {
-        // Обновляем isFavorite если уже есть
         exists.isFavorite = f.isFavorite;
         exists.friendshipId = f.friendshipId;
         exists.exchangeCount = f.exchangeCount;
       }
     }
     
-    // Добавляем информацию об онлайн статусе и непрочитанных
-    const friendsWithStatus = await Promise.all(allFriendsRaw.map(async (friendData) => {
+    // Собираем все ID друзей для подсчета сообщений за один запрос
+    const allFriendIds = allFriendsRaw.map(f => f.user._id);
+    
+    // Один агрегатный запрос вместо N
+    const unreadCounts = await FriendMessage.aggregate([
+      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false } },
+      { $group: { _id: '$fromUserId', count: { $sum: 1 } } }
+    ]);
+    const unreadMap = {};
+    unreadCounts.forEach(u => { unreadMap[u._id.toString()] = u.count; });
+    
+    // Добавляем информацию об онлайн статусе
+    const now = new Date();
+    const friendsWithStatus = allFriendsRaw.map(friendData => {
       const friend = friendData.user;
-      const now = new Date();
       const lastActivity = new Date(friend.lastActivity);
       const diffMs = now - lastActivity;
       const diffMins = Math.floor(diffMs / 60000);
       
       const isOnline = friend.hideOnline ? false : diffMins < 5;
+      const unreadCount = unreadMap[friend._id.toString()] || 0;
       
-      const unreadCount = await FriendMessage.countDocuments({
-        fromUserId: friend._id,
-        toUserId: userId,
-        read: false
-      });
-      
-      // Последний визит
       let lastSeenText = null;
       if (!friend.hideOnline && !isOnline) {
         if (diffMins < 60) {
@@ -752,6 +768,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
       }
       
       return {
+        id: friend._id,
         _id: friend._id,
         name: friend.name,
         avatar: friend.avatar,
@@ -765,7 +782,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
         isReferral: friendData.isReferral || false,
         exchangeCount: friendData.exchangeCount || 0
       };
-    }));
+    });
     
     // Сортируем: избранные сверху, потом онлайн, потом по имени
     friendsWithStatus.sort((a, b) => {

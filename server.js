@@ -367,6 +367,21 @@ const HelpRequest = mongoose.model('HelpRequest', helpRequestSchema);
 
 // ==================== HELPERS ====================
 
+// Кэш для GameSettings (не меняется часто)
+let cachedGameSettings = null;
+let gameSettingsCacheTime = 0;
+const GAME_SETTINGS_CACHE_TTL = 5 * 60 * 1000; // 5 минут
+
+async function getGameSettings() {
+  const now = Date.now();
+  if (cachedGameSettings && (now - gameSettingsCacheTime) < GAME_SETTINGS_CACHE_TTL) {
+    return cachedGameSettings;
+  }
+  cachedGameSettings = await GameSettings.findOne();
+  gameSettingsCacheTime = now;
+  return cachedGameSettings;
+}
+
 function generateReferralCode() {
   return 'PB' + crypto.randomBytes(4).toString('hex').toUpperCase();
 }
@@ -402,8 +417,43 @@ mongoose.connect(MONGODB_URI)
     console.log('✅ MongoDB подключена!');
     createAdminIfNeeded();
     seedGameData();
+    createIndexes();
   })
   .catch(err => console.error('❌ Ошибка MongoDB:', err));
+
+// Создание индексов для оптимизации запросов
+async function createIndexes() {
+  try {
+    // Парковки - для подсчёта по владельцу и статусу
+    await Parking.collection.createIndex({ ownerId: 1, status: 1 });
+    
+    // Транзакции - для истории пользователя
+    await Transaction.collection.createIndex({ userId: 1, createdAt: -1 });
+    
+    // Дружба - для поиска друзей
+    await Friendship.collection.createIndex({ user1: 1, status: 1 });
+    await Friendship.collection.createIndex({ user2: 1, status: 1 });
+    
+    // Сообщения друзей - для подсчёта непрочитанных
+    await FriendMessage.collection.createIndex({ fromUserId: 1, toUserId: 1, read: 1 });
+    await FriendMessage.collection.createIndex({ toUserId: 1, read: 1 });
+    
+    // Рефералы
+    await User.collection.createIndex({ referredBy: 1 });
+    
+    // Блокировки
+    await BlockedUser.collection.createIndex({ userId: 1 });
+    await BlockedUser.collection.createIndex({ blockedUserId: 1 });
+    
+    // Daily progress
+    await UserDailyProgress.collection.createIndex({ userId: 1, date: 1 });
+    await UserStreak.collection.createIndex({ userId: 1 });
+    
+    console.log('✅ Индексы созданы');
+  } catch (error) {
+    console.log('Indexes already exist or error:', error.message);
+  }
+}
 
 // ==================== TIMER ====================
 
@@ -2979,7 +3029,7 @@ app.get('/api/users/:id/level', async (req, res) => {
     const user = await User.findById(req.params.id);
     if (!user) return res.json({ level: 1, progress: 0 });
     
-    const settings = await GameSettings.findOne();
+    const settings = await getGameSettings();
     if (!settings || !settings.levels) {
       return res.json({ level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', progress: 0 });
     }
@@ -3074,7 +3124,7 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
     }
     
     const taskConfigs = await DailyTaskConfig.find({ isActive: true });
-    const settings = await GameSettings.findOne();
+    const settings = await getGameSettings();
     
     const tasks = progress.tasks.map(t => {
       const config = taskConfigs.find(c => c.code === t.code);
@@ -3172,7 +3222,7 @@ app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
     const allCompleted = progress.tasks.every(t => t.completed);
     if (!allCompleted) return res.json({ success: false });
     
-    const settings = await GameSettings.findOne();
+    const settings = await getGameSettings();
     const bonus = settings?.allDailyTasksBonus || 25;
     
     progress.allTasksBonusClaimed = true;
@@ -3192,7 +3242,7 @@ app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
 app.get('/api/users/:id/streak', async (req, res) => {
   try {
     const streak = await UserStreak.findOne({ userId: req.params.id });
-    const settings = await GameSettings.findOne();
+    const settings = await getGameSettings();
     
     res.json({
       currentStreak: streak?.currentStreak || 0,
@@ -3215,7 +3265,7 @@ app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
     if (!streak || streak.currentStreak < dayNum) return res.json({ success: false });
     if (streak.claimedBonuses?.includes(dayNum)) return res.json({ success: false });
     
-    const settings = await GameSettings.findOne();
+    const settings = await getGameSettings();
     const bonusConfig = settings?.streakBonuses?.find(b => b.day === dayNum);
     if (!bonusConfig) return res.json({ success: false });
     

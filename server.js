@@ -275,6 +275,75 @@ const mutedUserSchema = new mongoose.Schema({
 
 const MutedUser = mongoose.model('MutedUser', mutedUserSchema);
 
+// ==================== GAMIFICATION SCHEMAS ====================
+
+// Настройки игры (уровни, бонусы)
+const gameSettingsSchema = new mongoose.Schema({
+  levels: [{
+    level: Number,
+    name: { en: String, ru: String, es: String, uk: String },
+    icon: String,
+    minPoints: Number,
+    minParkingsGiven: Number
+  }],
+  streakBonuses: [{ day: Number, bonus: Number }],
+  allDailyTasksBonus: { type: Number, default: 25 }
+});
+const GameSettings = mongoose.model('GameSettings', gameSettingsSchema);
+
+// Конфиг достижений
+const achievementConfigSchema = new mongoose.Schema({
+  code: { type: String, unique: true },
+  icon: String,
+  name: { en: String, ru: String, es: String, uk: String },
+  description: { en: String, ru: String, es: String, uk: String },
+  condition: {
+    type: { type: String },
+    value: Number
+  },
+  reward: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: true }
+});
+const AchievementConfig = mongoose.model('AchievementConfig', achievementConfigSchema);
+
+// Конфиг ежедневных заданий
+const dailyTaskConfigSchema = new mongoose.Schema({
+  code: { type: String, unique: true },
+  icon: String,
+  name: { en: String, ru: String, es: String, uk: String },
+  type: { type: String, enum: ['give_parking', 'receive_parking', 'login'] },
+  targetValue: { type: Number, default: 1 },
+  reward: { type: Number, default: 10 },
+  isActive: { type: Boolean, default: true }
+});
+const DailyTaskConfig = mongoose.model('DailyTaskConfig', dailyTaskConfigSchema);
+
+// Прогресс пользователя по ежедневным заданиям
+const userDailyProgressSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  date: { type: String, required: true },
+  tasks: [{
+    taskId: mongoose.Schema.Types.ObjectId,
+    code: String,
+    currentValue: { type: Number, default: 0 },
+    completed: { type: Boolean, default: false },
+    rewardClaimed: { type: Boolean, default: false }
+  }],
+  allTasksBonusClaimed: { type: Boolean, default: false }
+});
+userDailyProgressSchema.index({ userId: 1, date: 1 }, { unique: true });
+const UserDailyProgress = mongoose.model('UserDailyProgress', userDailyProgressSchema);
+
+// Streak пользователя
+const userStreakSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  currentStreak: { type: Number, default: 0 },
+  longestStreak: { type: Number, default: 0 },
+  lastActiveDate: String,
+  claimedBonuses: [Number]
+});
+const UserStreak = mongoose.model('UserStreak', userStreakSchema);
+
 const helpRequestSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   location: {
@@ -332,6 +401,7 @@ mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB подключена!');
     createAdminIfNeeded();
+    seedGameData();
   })
   .catch(err => console.error('❌ Ошибка MongoDB:', err));
 
@@ -2870,6 +2940,322 @@ async function createAdminIfNeeded() {
     console.error('Admin setup error:', error);
   }
 }
+
+// ==================== GAMIFICATION ====================
+
+// Хелпер: получить сегодняшнюю дату в формате YYYY-MM-DD
+const getTodayDate = () => new Date().toISOString().split('T')[0];
+
+// Получить уровень пользователя
+app.get('/api/users/:id/level', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.json({ level: 1, progress: 0 });
+    
+    const settings = await GameSettings.findOne();
+    if (!settings || !settings.levels) {
+      return res.json({ level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', progress: 0 });
+    }
+    
+    const parkingsGiven = await Parking.countDocuments({ ownerId: req.params.id, status: 'completed' });
+    const totalPoints = user.totalPointsEarned || user.balance || 0;
+    
+    let currentLevel = settings.levels[0];
+    let nextLevel = settings.levels[1];
+    
+    for (let i = settings.levels.length - 1; i >= 0; i--) {
+      const lvl = settings.levels[i];
+      if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+        currentLevel = lvl;
+        nextLevel = settings.levels[i + 1] || null;
+        break;
+      }
+    }
+    
+    let progress = 100;
+    if (nextLevel) {
+      const pointsProgress = (totalPoints - currentLevel.minPoints) / (nextLevel.minPoints - currentLevel.minPoints);
+      const parkingsProgress = (parkingsGiven - currentLevel.minParkingsGiven) / (nextLevel.minParkingsGiven - currentLevel.minParkingsGiven);
+      progress = Math.min(Math.floor(Math.min(pointsProgress, parkingsProgress) * 100), 99);
+    }
+    
+    res.json({
+      level: currentLevel.level,
+      name: currentLevel.name,
+      icon: currentLevel.icon,
+      progress,
+      totalPoints,
+      parkingsGiven
+    });
+  } catch (error) {
+    res.json({ level: 1, progress: 0 });
+  }
+});
+
+// Получить ежедневные задания
+app.get('/api/users/:id/daily-tasks', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const today = getTodayDate();
+    
+    let progress = await UserDailyProgress.findOne({ userId, date: today });
+    
+    if (!progress) {
+      const taskConfigs = await DailyTaskConfig.find({ isActive: true });
+      progress = new UserDailyProgress({
+        userId,
+        date: today,
+        tasks: taskConfigs.map(t => ({
+          taskId: t._id,
+          code: t.code,
+          currentValue: 0,
+          completed: false,
+          rewardClaimed: false
+        }))
+      });
+      await progress.save();
+      
+      // Обновляем streak
+      let streak = await UserStreak.findOne({ userId });
+      if (!streak) {
+        streak = new UserStreak({ userId, currentStreak: 1, longestStreak: 1, lastActiveDate: today });
+      } else {
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toISOString().split('T')[0];
+        
+        if (streak.lastActiveDate === yesterdayStr) {
+          streak.currentStreak += 1;
+          if (streak.currentStreak > streak.longestStreak) {
+            streak.longestStreak = streak.currentStreak;
+          }
+        } else if (streak.lastActiveDate !== today) {
+          streak.currentStreak = 1;
+        }
+        streak.lastActiveDate = today;
+      }
+      await streak.save();
+      
+      // Отмечаем login задание
+      const loginTask = progress.tasks.find(t => t.code === 'daily_login');
+      if (loginTask) {
+        loginTask.currentValue = 1;
+        loginTask.completed = true;
+        await progress.save();
+      }
+    }
+    
+    const taskConfigs = await DailyTaskConfig.find({ isActive: true });
+    const settings = await GameSettings.findOne();
+    
+    const tasks = progress.tasks.map(t => {
+      const config = taskConfigs.find(c => c.code === t.code);
+      return {
+        code: t.code,
+        icon: config?.icon || '📋',
+        name: config?.name,
+        type: config?.type,
+        targetValue: config?.targetValue || 1,
+        currentValue: t.currentValue,
+        completed: t.completed,
+        rewardClaimed: t.rewardClaimed,
+        reward: config?.reward || 10
+      };
+    });
+    
+    const allCompleted = tasks.every(t => t.completed);
+    
+    res.json({
+      tasks,
+      allTasksCompleted: allCompleted,
+      allTasksBonusClaimed: progress.allTasksBonusClaimed,
+      allTasksBonus: settings?.allDailyTasksBonus || 25
+    });
+  } catch (error) {
+    console.log('Get daily tasks error:', error);
+    res.json({ tasks: [] });
+  }
+});
+
+// Забрать награду за задание
+app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
+  try {
+    const { id: userId, taskCode } = req.params;
+    const today = getTodayDate();
+    
+    const progress = await UserDailyProgress.findOne({ userId, date: today });
+    if (!progress) return res.json({ success: false });
+    
+    const task = progress.tasks.find(t => t.code === taskCode);
+    if (!task || !task.completed || task.rewardClaimed) {
+      return res.json({ success: false });
+    }
+    
+    const config = await DailyTaskConfig.findOne({ code: taskCode });
+    const reward = config?.reward || 10;
+    
+    task.rewardClaimed = true;
+    await progress.save();
+    
+    const user = await User.findByIdAndUpdate(userId, { $inc: { balance: reward, totalPointsEarned: reward } }, { new: true });
+    
+    await new Transaction({ userId, amount: reward, type: 'daily_task', description: `Daily task: ${taskCode}` }).save();
+    
+    res.json({ success: true, reward, newBalance: user.balance });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
+
+// Забрать бонус за все задания
+app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const today = getTodayDate();
+    
+    const progress = await UserDailyProgress.findOne({ userId, date: today });
+    if (!progress || progress.allTasksBonusClaimed) return res.json({ success: false });
+    
+    const allCompleted = progress.tasks.every(t => t.completed);
+    if (!allCompleted) return res.json({ success: false });
+    
+    const settings = await GameSettings.findOne();
+    const bonus = settings?.allDailyTasksBonus || 25;
+    
+    progress.allTasksBonusClaimed = true;
+    await progress.save();
+    
+    const user = await User.findByIdAndUpdate(userId, { $inc: { balance: bonus, totalPointsEarned: bonus } }, { new: true });
+    
+    await new Transaction({ userId, amount: bonus, type: 'daily_bonus', description: 'All daily tasks completed' }).save();
+    
+    res.json({ success: true, bonus, newBalance: user.balance });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
+
+// Получить streak
+app.get('/api/users/:id/streak', async (req, res) => {
+  try {
+    const streak = await UserStreak.findOne({ userId: req.params.id });
+    const settings = await GameSettings.findOne();
+    
+    res.json({
+      currentStreak: streak?.currentStreak || 0,
+      longestStreak: streak?.longestStreak || 0,
+      claimedBonuses: streak?.claimedBonuses || [],
+      bonuses: settings?.streakBonuses || []
+    });
+  } catch (error) {
+    res.json({ currentStreak: 0, longestStreak: 0, bonuses: [] });
+  }
+});
+
+// Забрать streak бонус
+app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
+  try {
+    const { id: userId, day } = req.params;
+    const dayNum = parseInt(day);
+    
+    const streak = await UserStreak.findOne({ userId });
+    if (!streak || streak.currentStreak < dayNum) return res.json({ success: false });
+    if (streak.claimedBonuses?.includes(dayNum)) return res.json({ success: false });
+    
+    const settings = await GameSettings.findOne();
+    const bonusConfig = settings?.streakBonuses?.find(b => b.day === dayNum);
+    if (!bonusConfig) return res.json({ success: false });
+    
+    streak.claimedBonuses = streak.claimedBonuses || [];
+    streak.claimedBonuses.push(dayNum);
+    await streak.save();
+    
+    const user = await User.findByIdAndUpdate(userId, { $inc: { balance: bonusConfig.bonus, totalPointsEarned: bonusConfig.bonus } }, { new: true });
+    
+    await new Transaction({ userId, amount: bonusConfig.bonus, type: 'streak_bonus', description: `${dayNum}-day streak bonus` }).save();
+    
+    res.json({ success: true, bonus: bonusConfig.bonus, newBalance: user.balance });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
+
+// Получить достижения
+app.get('/api/users/:id/achievements', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const configs = await AchievementConfig.find({ isActive: true });
+    
+    const achievements = configs.map(config => {
+      const userAch = user?.achievements?.find(a => a.code === config.code);
+      return {
+        code: config.code,
+        icon: config.icon,
+        name: config.name,
+        description: config.description,
+        reward: config.reward,
+        unlocked: !!userAch,
+        unlockedAt: userAch?.unlockedAt
+      };
+    });
+    
+    res.json(achievements);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Seed начальных данных геймификации
+const seedGameData = async () => {
+  try {
+    // Уровни
+    const settingsCount = await GameSettings.countDocuments();
+    if (settingsCount === 0) {
+      await new GameSettings({
+        levels: [
+          { level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', minPoints: 0, minParkingsGiven: 0 },
+          { level: 2, name: { en: 'Driver', ru: 'Водитель' }, icon: '🚙', minPoints: 100, minParkingsGiven: 5 },
+          { level: 3, name: { en: 'Expert', ru: 'Мастер' }, icon: '🏎️', minPoints: 500, minParkingsGiven: 25 },
+          { level: 4, name: { en: 'Legend', ru: 'Легенда' }, icon: '👑', minPoints: 2000, minParkingsGiven: 100 }
+        ],
+        streakBonuses: [
+          { day: 1, bonus: 5 },
+          { day: 3, bonus: 10 },
+          { day: 7, bonus: 25 },
+          { day: 14, bonus: 50 },
+          { day: 30, bonus: 100 }
+        ],
+        allDailyTasksBonus: 25
+      }).save();
+      console.log('✅ Game settings created');
+    }
+    
+    // Задания
+    const taskCount = await DailyTaskConfig.countDocuments();
+    if (taskCount === 0) {
+      await DailyTaskConfig.insertMany([
+        { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
+        { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
+        { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход' }, type: 'login', targetValue: 1, reward: 5 }
+      ]);
+      console.log('✅ Daily tasks created');
+    }
+    
+    // Достижения
+    const achCount = await AchievementConfig.countDocuments();
+    if (achCount === 0) {
+      await AchievementConfig.insertMany([
+        { code: 'first_share', icon: '🎉', name: { en: 'First Share', ru: 'Первая отдача' }, description: { en: 'Share your first spot', ru: 'Отдай первую парковку' }, condition: { type: 'parkings_given', value: 1 }, reward: 20 },
+        { code: 'helper_10', icon: '🤝', name: { en: 'Helper', ru: 'Помощник' }, description: { en: 'Share 10 spots', ru: 'Отдай 10 парковок' }, condition: { type: 'parkings_given', value: 10 }, reward: 50 },
+        { code: 'streak_7', icon: '🔥', name: { en: 'On Fire', ru: 'В ударе' }, description: { en: '7-day streak', ru: 'Серия 7 дней' }, condition: { type: 'streak', value: 7 }, reward: 50 },
+        { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP' }, description: { en: '50+ spots shared', ru: '50+ парковок отдано' }, condition: { type: 'parkings_given', value: 50 }, reward: 100 }
+      ]);
+      console.log('✅ Achievements created');
+    }
+  } catch (error) {
+    console.log('Seed game data error:', error.message);
+  }
+};
 
 // ==================== START ====================
 

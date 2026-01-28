@@ -2324,6 +2324,17 @@ app.post('/api/ratings', async (req, res) => {
   }
 });
 
+// Лёгкий endpoint для проверки баланса (без avatar!)
+app.get('/api/users/:id/balance', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('balance').lean();
+    if (!user) return res.status(404).json({ balance: 0 });
+    res.json({ balance: user.balance });
+  } catch (error) {
+    res.json({ balance: 0 });
+  }
+});
+
 app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id).lean();

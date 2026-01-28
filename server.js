@@ -58,11 +58,29 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// ==================== REQUEST COUNTER ====================
+let requestLog = [];
+app.use((req, res, next) => {
+  if (req.path.includes('/friends') || req.path.includes('/level') || req.path.includes('/stats')) {
+    requestLog.push({ time: new Date().toISOString(), path: req.path, duration: 0 });
+    if (requestLog.length > 50) requestLog = requestLog.slice(-50);
+  }
+  next();
+});
+
+// Endpoint для просмотра логов через браузер
+app.get('/api/debug/logs', (req, res) => {
+  res.json(requestLog);
+});
+
 // ==================== TIMING LOGGER ====================
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
+    // Обновляем duration в логе
+    const logEntry = requestLog.find(l => l.path === req.path && l.duration === 0);
+    if (logEntry) logEntry.duration = duration;
     // Логируем только медленные запросы (> 500ms) и ключевые endpoints
     if (duration > 500 || req.path.includes('/friends') || req.path.includes('/level') || req.path.includes('/stats') || req.path.includes('/daily-tasks')) {
       console.log(`⏱️ ${req.method} ${req.path} - ${duration}ms`);
@@ -782,7 +800,7 @@ app.get('/api/friends/check/:userId1/:userId2', async (req, res) => {
 app.get('/api/users/:id/friends', async (req, res) => {
   try {
     const userId = req.params.id;
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select('-avatar');
     if (!user) return res.json([]);
     
     // Получаем блокированных
@@ -797,12 +815,12 @@ app.get('/api/users/:id/friends', async (req, res) => {
     const friendsWhoUsedMyCode = await User.find({ 
       referredBy: userId,
       _id: { $nin: blockedIds }
-    }).select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    }).select('name lastActivity hideOnline rating ratingCount');
     
     let myReferrer = null;
     if (user.referredBy && !blockedIds.includes(user.referredBy.toString())) {
       myReferrer = await User.findById(user.referredBy)
-        .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+        .select('name lastActivity hideOnline rating ratingCount');
     }
     
     // 2. Друзья через Friendship - ОПТИМИЗИРОВАНО
@@ -819,7 +837,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
     // Один запрос вместо N
     const friendshipUsers = await User.find({ 
       _id: { $in: friendshipFriendIds } 
-    }).select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+    }).select('name lastActivity hideOnline rating ratingCount');
     
     // Создаем map для быстрого доступа
     const usersMap = {};
@@ -904,7 +922,6 @@ app.get('/api/users/:id/friends', async (req, res) => {
         id: friend._id,
         _id: friend._id,
         name: friend.name,
-        avatar: friend.avatar,
         rating: friend.rating,
         ratingCount: friend.ratingCount,
         isOnline,
@@ -938,7 +955,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
   const t0 = Date.now();
   try {
     const userId = req.params.id;
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select('-avatar').lean();
     console.log(`  [friends-all] User.findById: ${Date.now() - t0}ms`);
     if (!user) return res.json({ friends: [], friendRequests: [], outgoingRequests: [], blockedUsers: [], stats: null });
     
@@ -952,12 +969,12 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       friendsWhoUsedMyCode,
       myReferrer
     ] = await Promise.all([
-      BlockedUser.find({ $or: [{ userId }, { blockedUserId: userId }] }),
-      Friendship.find({ $or: [{ user1: userId }, { user2: userId }], status: 'accepted' }),
-      Friendship.find({ user2: userId, status: 'pending' }).populate('user1', 'name avatar rating ratingCount'),
-      Friendship.find({ user1: userId, status: 'pending' }).populate('user2', 'name avatar rating ratingCount'),
-      User.find({ referredBy: userId }).select('name avatar lastActivity hideOnline rating ratingCount pushToken'),
-      user.referredBy ? User.findById(user.referredBy).select('name avatar lastActivity hideOnline rating ratingCount pushToken') : null
+      BlockedUser.find({ $or: [{ userId }, { blockedUserId: userId }] }).lean(),
+      Friendship.find({ $or: [{ user1: userId }, { user2: userId }], status: 'accepted' }).lean(),
+      Friendship.find({ user2: userId, status: 'pending' }).populate('user1', 'name rating ratingCount').lean(),
+      Friendship.find({ user1: userId, status: 'pending' }).populate('user2', 'name rating ratingCount').lean(),
+      User.find({ referredBy: userId }).select('name lastActivity hideOnline rating ratingCount').lean(),
+      user.referredBy ? User.findById(user.referredBy).select('name lastActivity hideOnline rating ratingCount').lean() : null
     ]);
     console.log(`  [friends-all] Promise.all 6 queries: ${Date.now() - t1}ms`);
     
@@ -971,7 +988,8 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     const t2 = Date.now();
     // Один запрос для всех друзей из Friendship
     const friendshipUsers = await User.find({ _id: { $in: friendshipFriendIds } })
-      .select('name avatar lastActivity hideOnline rating ratingCount pushToken');
+      .select('name lastActivity hideOnline rating ratingCount')
+      .lean();
     console.log(`  [friends-all] User.find friends: ${Date.now() - t2}ms`);
     
     const usersMap = {};
@@ -1033,7 +1051,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       }
       
       return {
-        id: friend._id, _id: friend._id, name: friend.name, avatar: friend.avatar,
+        id: friend._id, _id: friend._id, name: friend.name,
         rating: friend.rating, ratingCount: friend.ratingCount, isOnline, lastSeenText,
         unreadCount: unreadMap[friend._id.toString()] || 0,
         isFavorite: friendData.isFavorite || false, friendshipId: friendData.friendshipId || null,
@@ -1082,7 +1100,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     
     // Заблокированные (с данными пользователей)
     const blockedUserIds = blockedUsers.filter(b => b.userId.toString() === userId).map(b => b.blockedUserId);
-    const blockedUsersData = await User.find({ _id: { $in: blockedUserIds } }).select('name avatar');
+    const blockedUsersData = await User.find({ _id: { $in: blockedUserIds } }).select('name');
     
     res.json({ friends, friendRequests, outgoingRequests, blockedUsers: blockedUsersData, stats });
   } catch (error) {
@@ -1353,7 +1371,9 @@ app.post('/api/parkings/:id/send-to-friend', async (req, res) => {
 // Получить статистику пользователя
 app.get('/api/users/:id/stats', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const user = await User.findById(req.params.id)
+      .select('parkingsGiven parkingsReceived rating ratingCount referralCount')
+      .lean();
     if (!user) return res.status(404).json({ success: false });
     
     // Считаем достижения
@@ -2270,11 +2290,11 @@ app.post('/api/ratings', async (req, res) => {
 
 app.get('/api/users/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json(null);
     res.json(user);
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET USER ERROR:", error);
     res.status(500).json(null);
   }
 });
@@ -2320,12 +2340,13 @@ app.post('/api/users/:id/push-token', async (req, res) => {
 app.get('/api/users/:id/ratings', async (req, res) => {
   try {
     const ratings = await Rating.find({ toUserId: req.params.id })
-      .populate('fromUserId', 'name avatar')
+      .populate('fromUserId', 'name')
       .sort({ createdAt: -1 })
-      .limit(20);
+      .limit(20)
+      .lean();
     res.json(ratings);
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET RATINGS ERROR:", error);
     res.json([]);
   }
 });
@@ -3198,7 +3219,7 @@ const getTodayDate = () => new Date().toISOString().split('T')[0];
 app.get('/api/users/:id/level', async (req, res) => {
   const t0 = Date.now();
   try {
-    const user = await User.findById(req.params.id);
+    const user = await User.findById(req.params.id).select('totalPointsEarned balance').lean();
     console.log(`  [level] User.findById: ${Date.now() - t0}ms`);
     if (!user) return res.json({ level: 1, progress: 0 });
     

@@ -5,6 +5,31 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
+const sharp = require('sharp');
+
+// ==================== THUMBNAIL CREATOR ====================
+async function createThumbnail(base64Image, size = 80) {
+  try {
+    if (!base64Image || !base64Image.startsWith('data:image')) return null;
+    
+    // Извлекаем данные из base64
+    const matches = base64Image.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!matches) return null;
+    
+    const imageBuffer = Buffer.from(matches[2], 'base64');
+    
+    // Создаём миниатюру
+    const thumbnailBuffer = await sharp(imageBuffer)
+      .resize(size, size, { fit: 'cover' })
+      .jpeg({ quality: 70 })
+      .toBuffer();
+    
+    return `data:image/jpeg;base64,${thumbnailBuffer.toString('base64')}`;
+  } catch (error) {
+    console.log('Thumbnail error:', error.message);
+    return null;
+  }
+}
 
 // ==================== PUSH NOTIFICATIONS ====================
 const sendPushNotification = async (pushToken, title, body, data = {}) => {
@@ -105,6 +130,7 @@ const userSchema = new mongoose.Schema({
     size: String, length: Number, width: Number, year: String
   },
   avatar: String,
+  avatarThumb: String, // Миниатюра 80x80 для списков
   language: { type: String, default: 'ru' },
   isAdmin: { type: Boolean, default: false },
   
@@ -815,12 +841,12 @@ app.get('/api/users/:id/friends', async (req, res) => {
     const friendsWhoUsedMyCode = await User.find({ 
       referredBy: userId,
       _id: { $nin: blockedIds }
-    }).select('name lastActivity hideOnline rating ratingCount');
+    }).select('name avatarThumb lastActivity hideOnline rating ratingCount');
     
     let myReferrer = null;
     if (user.referredBy && !blockedIds.includes(user.referredBy.toString())) {
       myReferrer = await User.findById(user.referredBy)
-        .select('name lastActivity hideOnline rating ratingCount');
+        .select('name avatarThumb lastActivity hideOnline rating ratingCount');
     }
     
     // 2. Друзья через Friendship - ОПТИМИЗИРОВАНО
@@ -837,7 +863,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
     // Один запрос вместо N
     const friendshipUsers = await User.find({ 
       _id: { $in: friendshipFriendIds } 
-    }).select('name lastActivity hideOnline rating ratingCount');
+    }).select('name avatarThumb lastActivity hideOnline rating ratingCount');
     
     // Создаем map для быстрого доступа
     const usersMap = {};
@@ -922,6 +948,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
         id: friend._id,
         _id: friend._id,
         name: friend.name,
+        avatar: friend.avatarThumb, // Используем миниатюру
         rating: friend.rating,
         ratingCount: friend.ratingCount,
         isOnline,
@@ -971,10 +998,10 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     ] = await Promise.all([
       BlockedUser.find({ $or: [{ userId }, { blockedUserId: userId }] }).lean(),
       Friendship.find({ $or: [{ user1: userId }, { user2: userId }], status: 'accepted' }).lean(),
-      Friendship.find({ user2: userId, status: 'pending' }).populate('user1', 'name rating ratingCount').lean(),
-      Friendship.find({ user1: userId, status: 'pending' }).populate('user2', 'name rating ratingCount').lean(),
-      User.find({ referredBy: userId }).select('name lastActivity hideOnline rating ratingCount').lean(),
-      user.referredBy ? User.findById(user.referredBy).select('name lastActivity hideOnline rating ratingCount').lean() : null
+      Friendship.find({ user2: userId, status: 'pending' }).populate('user1', 'name avatarThumb rating ratingCount').lean(),
+      Friendship.find({ user1: userId, status: 'pending' }).populate('user2', 'name avatarThumb rating ratingCount').lean(),
+      User.find({ referredBy: userId }).select('name avatarThumb lastActivity hideOnline rating ratingCount').lean(),
+      user.referredBy ? User.findById(user.referredBy).select('name avatarThumb lastActivity hideOnline rating ratingCount').lean() : null
     ]);
     console.log(`  [friends-all] Promise.all 6 queries: ${Date.now() - t1}ms`);
     
@@ -988,7 +1015,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     const t2 = Date.now();
     // Один запрос для всех друзей из Friendship
     const friendshipUsers = await User.find({ _id: { $in: friendshipFriendIds } })
-      .select('name lastActivity hideOnline rating ratingCount')
+      .select('name avatarThumb lastActivity hideOnline rating ratingCount')
       .lean();
     console.log(`  [friends-all] User.find friends: ${Date.now() - t2}ms`);
     
@@ -1052,6 +1079,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       
       return {
         id: friend._id, _id: friend._id, name: friend.name,
+        avatar: friend.avatarThumb, // Используем миниатюру
         rating: friend.rating, ratingCount: friend.ratingCount, isOnline, lastSeenText,
         unreadCount: unreadMap[friend._id.toString()] || 0,
         isFavorite: friendData.isFavorite || false, friendshipId: friendData.friendshipId || null,
@@ -1071,11 +1099,19 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     // Формируем запросы
     const friendRequests = pendingIncoming
       .filter(r => r.user1 && !blockedIds.includes(r.user1._id.toString()))
-      .map(r => ({ friendshipId: r._id, user: r.user1, createdAt: r.createdAt }));
+      .map(r => ({ 
+        friendshipId: r._id, 
+        user: { ...r.user1, avatar: r.user1.avatarThumb }, 
+        createdAt: r.createdAt 
+      }));
     
     const outgoingRequests = pendingOutgoing
       .filter(r => r.user2 && !blockedIds.includes(r.user2._id.toString()))
-      .map(r => ({ friendshipId: r._id, user: r.user2, createdAt: r.createdAt }));
+      .map(r => ({ 
+        friendshipId: r._id, 
+        user: { ...r.user2, avatar: r.user2.avatarThumb }, 
+        createdAt: r.createdAt 
+      }));
     
     // Статистика
     const achievements = [];
@@ -2306,7 +2342,11 @@ app.put("/api/users/:id", async (req, res) => {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
     if (car) user.car = car;
-    if (avatar) user.avatar = avatar;
+    if (avatar) {
+      user.avatar = avatar;
+      // Создаём миниатюру
+      user.avatarThumb = await createThumbnail(avatar, 80);
+    }
     if (language) user.language = language;
     if (req.body.lastLocation) user.lastLocation = req.body.lastLocation;
     await user.save();
@@ -3116,6 +3156,48 @@ app.get('/api/admin/transactions', async (req, res) => {
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
     res.status(500).json([]);
+  }
+});
+
+// ==================== AVATAR MIGRATION ====================
+// Endpoint для создания миниатюр у существующих пользователей
+app.post('/api/admin/migrate-avatars', async (req, res) => {
+  try {
+    // Находим пользователей с avatar, но без avatarThumb
+    const users = await User.find({ 
+      avatar: { $exists: true, $ne: null, $ne: '' },
+      $or: [
+        { avatarThumb: { $exists: false } },
+        { avatarThumb: null },
+        { avatarThumb: '' }
+      ]
+    }).select('_id avatar');
+    
+    console.log(`Found ${users.length} users to migrate`);
+    
+    let migrated = 0;
+    let failed = 0;
+    
+    for (const user of users) {
+      try {
+        const thumb = await createThumbnail(user.avatar, 80);
+        if (thumb) {
+          await User.findByIdAndUpdate(user._id, { avatarThumb: thumb });
+          migrated++;
+          console.log(`Migrated avatar for user ${user._id}`);
+        } else {
+          failed++;
+        }
+      } catch (err) {
+        failed++;
+        console.log(`Failed to migrate user ${user._id}:`, err.message);
+      }
+    }
+    
+    res.json({ success: true, total: users.length, migrated, failed });
+  } catch (error) {
+    console.log('Migration error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

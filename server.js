@@ -2564,9 +2564,11 @@ app.get('/api/stats', async (req, res) => {
 app.get('/api/parkings/nearby', async (req, res) => {
   try {
     const parkings = await Parking.find({ status: 'available', $or: [{ expiresAt: { $gt: new Date() } }, { expiresAt: { $exists: false }, timeToLeave: { $gt: 0 } }] })
-      .populate('ownerId', 'name car avatar rating ratingCount');
+      .populate('ownerId', 'name car avatarThumb rating ratingCount')
+      .lean();
     const result = parkings.map(p => ({
-      ...p.toObject(),
+      ...p,
+      ownerId: p.ownerId ? { ...p.ownerId, avatar: p.ownerId.avatarThumb } : null,
       timeToLeave: p.expiresAt ? Math.max(0, Math.round((new Date(p.expiresAt) - new Date()) / 60000)) : p.timeToLeave
     }));
     res.json(result);
@@ -2584,10 +2586,10 @@ app.post('/api/parkings/create', async (req, res) => {
     if (existing) {
       return res.status(400).json({ success: false, message: 'У вас уже есть активная парковка' });
     }
-    const owner = await User.findById(ownerId);
+    const owner = await User.findById(ownerId).select('car avatarThumb rating').lean();
     const newParking = new Parking({
       ownerId, location, address, price, timeToLeave, expiresAt: new Date(Date.now() + timeToLeave * 60000), status: 'available',
-      ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating,
+      ownerCar: owner?.car, ownerAvatar: owner?.avatarThumb, ownerRating: owner?.rating,
       extensionsUsed: 0, messages: []
     });
     await newParking.save();
@@ -2602,8 +2604,8 @@ app.post('/api/parkings/book', async (req, res) => {
   try {
     const { parkingId, userId } = req.body;
     
-    // Предварительные проверки
-    const user = await User.findById(userId);
+    // Предварительные проверки - только нужные поля!
+    const user = await User.findById(userId).select('name balance car avatarThumb rating').lean();
     if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
     
     const parkingCheck = await Parking.findById(parkingId);
@@ -2620,7 +2622,7 @@ app.post('/api/parkings/book', async (req, res) => {
         bookedAt: new Date(),
         bookerCar: user.car,
         bookerName: user.name,
-        bookerAvatar: user.avatar,
+        bookerAvatar: user.avatarThumb, // Миниатюра!
         bookerRating: user.rating
       },
       { new: true }  // Вернуть обновлённый документ
@@ -2631,18 +2633,18 @@ app.post('/api/parkings/book', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Парковка уже занята' });
     }
 
-    // Теперь безопасно списываем баллы (парковка уже наша)
-    user.balance -= parking.price;
-    await user.save();
+    // Списываем баллы атомарно
+    const newBalance = user.balance - parking.price;
+    await User.findByIdAndUpdate(userId, { balance: newBalance });
 
     const platformFee = Math.ceil(parking.price * 0.25);
     const ownerEarnings = parking.price - platformFee;
 
-    // Начисляем владельцу атомарно
+    // Начисляем владельцу атомарно и получаем только нужные поля
     const owner = await User.findByIdAndUpdate(
       parking.ownerId,
       { $inc: { balance: ownerEarnings } },
-      { new: true }
+      { new: true, projection: { name: 1, car: 1, avatarThumb: 1, rating: 1, pushToken: 1, language: 1 } }
     );
     
     console.log("=== BOOKING PAYMENT (ATOMIC) ===");
@@ -2670,13 +2672,13 @@ app.post('/api/parkings/book', async (req, res) => {
     }
 
     res.json({
-      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: user.balance,
+      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance,
       parking: { ...parking.toObject(),
-        bookingId: booking?._id, ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatar, ownerRating: owner?.rating },
+        bookingId: booking?._id, ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatarThumb, ownerRating: owner?.rating },
       bookingId: booking._id
     });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("BOOKING ERROR:", error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
@@ -2684,10 +2686,16 @@ app.post('/api/parkings/book', async (req, res) => {
 app.get('/api/users/:id/my-parkings', async (req, res) => {
   try {
     const parkings = await Parking.find({ ownerId: req.params.id, status: { $in: ['available', 'booked'] } })
-      .populate('bookedBy', 'name car avatar rating');
-    res.json(parkings);
+      .populate('bookedBy', 'name car avatarThumb rating')
+      .lean();
+    // Преобразуем avatarThumb в avatar для совместимости
+    const result = parkings.map(p => ({
+      ...p,
+      bookedBy: p.bookedBy ? { ...p.bookedBy, avatar: p.bookedBy.avatarThumb } : null
+    }));
+    res.json(result);
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET MY PARKINGS ERROR:", error);
     res.json([]);
   }
 });
@@ -2695,22 +2703,23 @@ app.get('/api/users/:id/my-parkings', async (req, res) => {
 app.get('/api/users/:id/my-booking', async (req, res) => {
   try {
     const parking = await Parking.findOne({ bookedBy: req.params.id, status: 'booked' })
-      .populate('ownerId', 'name car avatar rating');
+      .populate('ownerId', 'name car avatarThumb rating')
+      .lean();
     if (parking) {
       const booking = await Booking.findOne({ parkingId: parking._id, status: "active" });
       res.json({
-        ...parking.toObject(),
+        ...parking,
         bookingId: booking?._id,
         ownerName: parking.ownerId?.name || 'Владелец',
         ownerCar: parking.ownerId?.car,
-        ownerAvatar: parking.ownerId?.avatar,
+        ownerAvatar: parking.ownerId?.avatarThumb,
         ownerRating: parking.ownerId?.rating
       });
     } else {
       res.json(null);
     }
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET MY BOOKING ERROR:", error);
     res.json(null);
   }
 });
@@ -2722,26 +2731,29 @@ app.get('/api/users/:id/completed-bookings', async (req, res) => {
       $or: [{ userId }, { ownerId: userId }],
       status: 'completed'
     })
-      .populate('userId', 'name avatar rating')
-      .populate('ownerId', 'name avatar rating')
+      .populate('userId', 'name avatarThumb rating')
+      .populate('ownerId', 'name avatarThumb rating')
       .sort({ completedAt: -1 })
-      .limit(20);
+      .limit(20)
+      .lean();
     
     // Добавляем информацию о том, нужно ли ставить оценку
     const bookingsWithRatingInfo = bookings.map(b => {
       const isOwner = b.ownerId._id.toString() === userId;
       const needsRating = isOwner ? !b.ownerRatedBooker : !b.bookerRatedOwner;
       return {
-        ...b.toObject(),
+        ...b,
         isOwner,
         needsRating,
-        otherUser: isOwner ? b.userId : b.ownerId
+        otherUser: isOwner 
+          ? { ...b.userId, avatar: b.userId?.avatarThumb }
+          : { ...b.ownerId, avatar: b.ownerId?.avatarThumb }
       };
     });
     
     res.json(bookingsWithRatingInfo);
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("GET COMPLETED BOOKINGS ERROR:", error);
     res.json([]);
   }
 });
@@ -2841,9 +2853,11 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
     parking.arrivedAt = new Date();
     await parking.save();
     
-    // Push notification to owner - driver arrived
-    const owner = await User.findById(parking.ownerId);
-    const booker = await User.findById(parking.bookedBy);
+    // Push notification to owner - driver arrived (только нужные поля!)
+    const [owner, booker] = await Promise.all([
+      User.findById(parking.ownerId).select('pushToken language').lean(),
+      User.findById(parking.bookedBy).select('name').lean()
+    ]);
     if (owner && owner.pushToken) {
       const lang = owner.language || 'en';
       const title = getPushText('arrived', 'title', lang);
@@ -2852,7 +2866,7 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
     }
     res.json({ success: true, parking });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("ARRIVED ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -2871,8 +2885,12 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       { new: true }
     );
 
-    // Push notification to booker - deal completed (no earnings, just confirmation)
-    const booker = await User.findById(parking.bookedBy);
+    // Push notifications - параллельно, только нужные поля
+    const [booker, owner] = await Promise.all([
+      User.findById(parking.bookedBy).select('pushToken language').lean(),
+      User.findById(parking.ownerId).select('pushToken language').lean()
+    ]);
+    
     if (booker && booker.pushToken) {
       const lang = booker.language || 'en';
       const title = getPushText('completedBooker', 'title', lang);
@@ -2880,8 +2898,6 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       sendPushNotification(booker.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
     }
     
-    // Push notification to owner - you earned points
-    const owner = await User.findById(parking.ownerId);
     if (owner && owner.pushToken) {
       const lang = owner.language || 'en';
       const ownerEarnings = Math.floor(parking.price * 0.75);
@@ -2890,21 +2906,21 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       sendPushNotification(owner.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
     }
     
-    // Обновляем статистику пользователей
-    await User.findByIdAndUpdate(parking.ownerId, { $inc: { parkingsGiven: 1 } });
-    await User.findByIdAndUpdate(parking.bookedBy, { $inc: { parkingsReceived: 1 } });
-    
-    // Обновляем exchangeCount в Friendship если они друзья
-    await Friendship.updateOne(
-      {
-        $or: [
-          { user1: parking.ownerId, user2: parking.bookedBy },
-          { user1: parking.bookedBy, user2: parking.ownerId }
-        ],
-        status: 'accepted'
-      },
-      { $inc: { exchangeCount: 1 } }
-    );
+    // Обновляем статистику пользователей - параллельно
+    await Promise.all([
+      User.findByIdAndUpdate(parking.ownerId, { $inc: { parkingsGiven: 1 } }),
+      User.findByIdAndUpdate(parking.bookedBy, { $inc: { parkingsReceived: 1 } }),
+      Friendship.updateOne(
+        {
+          $or: [
+            { user1: parking.ownerId, user2: parking.bookedBy },
+            { user1: parking.bookedBy, user2: parking.ownerId }
+          ],
+          status: 'accepted'
+        },
+        { $inc: { exchangeCount: 1 } }
+      )
+    ]);
     
     // Обновляем прогресс заданий
     const today = new Date().toISOString().split('T')[0];
@@ -2935,7 +2951,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     
     res.json({ success: true, message: 'Сделка завершена!', bookingId: booking?._id });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("CONFIRM MEET ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -2991,10 +3007,12 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
     parking.waitRequest = { minutes, fromUserId, createdAt: new Date() };
     await parking.save();
     
-    // Push notification - wait request
-    const sender = await User.findById(fromUserId);
+    // Push notification - wait request (только нужные поля)
     const recipientId = fromUserId === parking.ownerId?.toString() ? parking.bookedBy : parking.ownerId;
-    const recipient = await User.findById(recipientId);
+    const [sender, recipient] = await Promise.all([
+      User.findById(fromUserId).select('name').lean(),
+      User.findById(recipientId).select('pushToken language').lean()
+    ]);
     if (recipient && recipient.pushToken) {
       const lang = recipient.language || 'en';
       const title = getPushText('waitRequest', 'title', lang);
@@ -3003,7 +3021,7 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
     }
     res.json({ success: true });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("WAIT REQUEST ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -3197,6 +3215,60 @@ app.post('/api/admin/migrate-avatars', async (req, res) => {
     res.json({ success: true, total: users.length, migrated, failed });
   } catch (error) {
     console.log('Migration error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Миграция аватаров в парковках (заменяем полные на миниатюры)
+app.post('/api/admin/migrate-parking-avatars', async (req, res) => {
+  try {
+    // Находим парковки с большими аватарами (больше 10KB = скорее всего полный avatar)
+    const parkings = await Parking.find({
+      $or: [
+        { ownerAvatar: { $exists: true, $regex: /^data:image.*base64,.{10000,}/ } },
+        { bookerAvatar: { $exists: true, $regex: /^data:image.*base64,.{10000,}/ } }
+      ]
+    }).select('_id ownerAvatar bookerAvatar ownerId bookedBy');
+    
+    console.log(`Found ${parkings.length} parkings with large avatars to migrate`);
+    
+    let migrated = 0;
+    let failed = 0;
+    
+    for (const parking of parkings) {
+      try {
+        const updates = {};
+        
+        // Если ownerAvatar большой - берём avatarThumb из User
+        if (parking.ownerAvatar && parking.ownerAvatar.length > 10000) {
+          const owner = await User.findById(parking.ownerId).select('avatarThumb').lean();
+          if (owner?.avatarThumb) {
+            updates.ownerAvatar = owner.avatarThumb;
+          }
+        }
+        
+        // Если bookerAvatar большой - берём avatarThumb из User
+        if (parking.bookerAvatar && parking.bookerAvatar.length > 10000) {
+          const booker = await User.findById(parking.bookedBy).select('avatarThumb').lean();
+          if (booker?.avatarThumb) {
+            updates.bookerAvatar = booker.avatarThumb;
+          }
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          await Parking.findByIdAndUpdate(parking._id, updates);
+          migrated++;
+          console.log(`Migrated parking ${parking._id}`);
+        }
+      } catch (err) {
+        failed++;
+        console.log(`Failed to migrate parking ${parking._id}:`, err.message);
+      }
+    }
+    
+    res.json({ success: true, total: parkings.length, migrated, failed });
+  } catch (error) {
+    console.log('Parking migration error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

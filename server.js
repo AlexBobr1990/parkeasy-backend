@@ -2518,7 +2518,7 @@ app.post('/api/help-requests/create', async (req, res) => {
     const { userId, location, address, problemType, description, reward } = req.body;
     
     // Лимит награды: максимум 50 баллов
-    const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 50);
+    const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 100);
     
     // Проверяем баланс
     const user = await User.findById(userId).select('balance').lean();

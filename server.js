@@ -2137,15 +2137,16 @@ app.delete('/api/users/:id/account', async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     
-    // Для email-аккаунтов требуем пароль
-    if (user.password && !user.googleId && !user.appleId) {
-      if (!password) {
-        return res.status(400).json({ success: false, message: 'Password required' });
-      }
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        return res.status(403).json({ success: false, message: 'Wrong password' });
-      }
+    // Требуем пароль для подтверждения удаления
+    if (!password) {
+      return res.status(400).json({ success: false, message: 'Password required' });
+    }
+    if (!user.password) {
+      return res.status(400).json({ success: false, message: 'Cannot delete account without password' });
+    }
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(403).json({ success: false, message: 'Wrong password' });
     }
     
     // Отменяем активные парковки пользователя
@@ -2407,6 +2408,12 @@ app.post('/api/ratings', async (req, res) => {
     
     if (!isOwner && !isBooker) {
       return res.status(403).json({ success: false, message: 'Вы не участвовали в этом бронировании' });
+    }
+    
+    // Проверяем что toUserId = другой участник (нельзя подставить постороннего)
+    const expectedTo = isOwner ? booking.userId.toString() : booking.ownerId.toString();
+    if (toUserId !== expectedTo) {
+      return res.status(400).json({ success: false, message: 'Invalid rating target' });
     }
     
     // Проверяем что ещё не ставили оценку
@@ -3386,9 +3393,14 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
 
 app.post("/api/parkings/:id/wait-response", async (req, res) => {
   try {
-    const { accepted } = req.body;
+    const { accepted, userId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка: только участники
+    if (userId && userId !== parking.ownerId?.toString() && userId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     
     if (accepted && parking.waitRequest) {
       parking.expiresAt = new Date(parking.expiresAt.getTime() + parking.waitRequest.minutes * 60000);
@@ -3905,12 +3917,14 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
 app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
   try {
     const { id: userId, taskCode } = req.params;
-    const today = getTodayDate();
+    const { callerUserId } = req.body;
     
-    console.log('=== CLAIM TASK ===');
-    console.log('userId:', userId);
-    console.log('taskCode:', taskCode);
-    console.log('today:', today);
+    // Проверка: только сам пользователь может клеймить свои задания
+    if (callerUserId && callerUserId !== userId) {
+      return res.status(403).json({ success: false, reason: 'access_denied' });
+    }
+    
+    const today = getTodayDate();
     
     const progress = await UserDailyProgress.findOne({ userId, date: today });
     if (!progress) {
@@ -3960,6 +3974,13 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
 app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
   try {
     const userId = req.params.id;
+    const { callerUserId } = req.body;
+    
+    // Проверка: только сам пользователь
+    if (callerUserId && callerUserId !== userId) {
+      return res.status(403).json({ success: false, reason: 'access_denied' });
+    }
+    
     const today = getTodayDate();
     
     const progress = await UserDailyProgress.findOne({ userId, date: today });
@@ -4005,6 +4026,13 @@ app.get('/api/users/:id/streak', async (req, res) => {
 app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
   try {
     const { id: userId, day } = req.params;
+    const { callerUserId } = req.body;
+    
+    // Проверка: только сам пользователь
+    if (callerUserId && callerUserId !== userId) {
+      return res.status(403).json({ success: false, reason: 'access_denied' });
+    }
+    
     const dayNum = parseInt(day);
     
     const streak = await UserStreak.findOne({ userId });

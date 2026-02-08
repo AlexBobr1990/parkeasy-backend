@@ -7,6 +7,31 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const sharp = require('sharp');
 
+// ==================== RATE LIMITER ====================
+const rateLimitStore = {};
+function rateLimit(key, maxRequests, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const id = `${key}:${ip}`;
+    const now = Date.now();
+    if (!rateLimitStore[id]) rateLimitStore[id] = [];
+    rateLimitStore[id] = rateLimitStore[id].filter(t => t > now - windowMs);
+    if (rateLimitStore[id].length >= maxRequests) {
+      return res.status(429).json({ success: false, message: 'Too many requests. Try again later.' });
+    }
+    rateLimitStore[id].push(now);
+    next();
+  };
+}
+// Чистим старые записи каждые 10 минут
+setInterval(() => {
+  const now = Date.now();
+  for (const key in rateLimitStore) {
+    rateLimitStore[key] = rateLimitStore[key].filter(t => t > now - 3600000);
+    if (rateLimitStore[key].length === 0) delete rateLimitStore[key];
+  }
+}, 600000);
+
 // ==================== THUMBNAIL CREATOR ====================
 async function createThumbnail(base64Image, size = 80) {
   try {
@@ -82,6 +107,35 @@ const getPushText = (type, field, lang, vars = {}) => {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ==================== ADMIN PROTECTION ====================
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+const adminAuth = async (req, res, next) => {
+  // Способ 1: секретный ключ через header или query
+  const secret = req.headers['x-admin-secret'] || req.query.secret;
+  if (ADMIN_SECRET && secret === ADMIN_SECRET) return next();
+  
+  // Способ 2: adminId в body/query — проверяем что пользователь реально админ
+  const adminId = req.body?.adminId || req.query?.adminId || req.headers['x-admin-id'];
+  if (adminId) {
+    try {
+      const admin = await User.findById(adminId).select('isAdmin').lean();
+      if (admin?.isAdmin) return next();
+    } catch (e) {}
+  }
+  
+  // Если ADMIN_SECRET не установлен и adminId не передан — пропускаем (обратная совместимость)
+  // ВАЖНО: установи ADMIN_SECRET в env переменных на сервере для полной защиты!
+  if (!ADMIN_SECRET) {
+    console.warn(`⚠️ ADMIN endpoint accessed without auth: ${req.method} ${req.path} — set ADMIN_SECRET env var to protect!`);
+    return next();
+  }
+  
+  return res.status(403).json({ success: false, message: 'Admin access denied' });
+};
+
+// Применяем ко всем /api/admin/* маршрутам
+app.use('/api/admin', adminAuth);
 
 // ==================== REQUEST COUNTER ====================
 let requestLog = [];
@@ -175,7 +229,7 @@ const userSchema = new mongoose.Schema({
   
   // Достижения
   achievements: [{
-    id: String,
+    code: String,
     unlockedAt: Date
   }],
   
@@ -534,7 +588,7 @@ app.get('/', (req, res) => {
 
 // ==================== AUTH ====================
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', rateLimit('register', 5, 3600000), async (req, res) => {
   try {
     const { email, password, name, car, referralCode, acceptedTerms } = req.body;
     
@@ -582,18 +636,11 @@ app.post('/api/auth/register', async (req, res) => {
     
     await newUser.save();
     
-    // Начисляем бонус рефереру
+    // Начисляем бонус рефереру ПОСЛЕ верификации email (не сейчас)
+    // referrer bonus будет начислен в /api/auth/verify-email
     if (referrer) {
-      referrer.balance += 20;
-      referrer.referralCount += 1;
-      await referrer.save();
-      
-      await new Transaction({
-        userId: referrer._id,
-        type: 'referral',
-        amount: 20,
-        description: `Реферальный бонус за ${name.trim()}`
-      }).save();
+      // Только сохраняем связь, но НЕ начисляем бонус до верификации
+      console.log(`Referral saved: ${name.trim()} referred by ${referrer.name} — bonus pending email verification`);
     }
     
     // Транзакция бонуса за регистрацию
@@ -656,6 +703,30 @@ app.post('/api/auth/verify-email', async (req, res) => {
     user.verificationCode = null;
     user.verificationExpires = null;
     await user.save();
+    
+    // Начисляем реферальный бонус ПОСЛЕ верификации email
+    if (user.referredBy) {
+      const referrer = await User.findById(user.referredBy);
+      if (referrer) {
+        // Лимит: максимум 10 рефералов в день
+        const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+        const todayReferrals = await Transaction.countDocuments({ 
+          userId: referrer._id, type: 'referral', createdAt: { $gte: todayStart }
+        });
+        if (todayReferrals < 10) {
+          referrer.balance += 20;
+          referrer.referralCount += 1;
+          await referrer.save();
+          await new Transaction({
+            userId: referrer._id, type: 'referral', amount: 20,
+            description: `Реферальный бонус за ${user.name}`
+          }).save();
+          console.log(`✅ Referral bonus +20 to ${referrer.name} for verified user ${user.name}`);
+        } else {
+          console.log(`⚠️ Referral daily limit reached for ${referrer.name}`);
+        }
+      }
+    }
     
     res.json({ success: true, message: 'Email подтверждён!' });
   } catch (error) {
@@ -1243,13 +1314,23 @@ app.post('/api/friends/mark-read', async (req, res) => {
 // Общее количество непрочитанных сообщений от друзей
 app.get('/api/users/:id/unread-messages', async (req, res) => {
   try {
+    const userId = req.params.id;
+    
+    // Непрочитанные сообщения
     const count = await FriendMessage.countDocuments({
-      toUserId: req.params.id,
+      toUserId: userId,
       read: false
     });
-    res.json({ count });
+    
+    // Входящие заявки в друзья
+    const friendRequests = await Friendship.countDocuments({
+      toUserId: userId,
+      status: 'pending'
+    });
+    
+    res.json({ count, friendRequests });
   } catch (error) {
-    res.json({ count: 0 });
+    res.json({ count: 0, friendRequests: 0 });
   }
 });
 
@@ -2077,7 +2158,7 @@ app.delete('/api/users/:id/account', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -2339,7 +2420,8 @@ app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json(null);
-    res.json(user);
+    // Добавляем id как строку для совместимости с фронтендом
+    res.json({ ...user, id: user._id.toString() });
   } catch (error) {
     console.log("GET USER ERROR:", error);
     res.status(500).json(null);
@@ -2434,9 +2516,19 @@ app.get('/api/help-requests', async (req, res) => {
 app.post('/api/help-requests/create', async (req, res) => {
   try {
     const { userId, location, address, problemType, description, reward } = req.body;
+    
+    // Лимит награды: максимум 50 баллов
+    const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 50);
+    
+    // Проверяем баланс
+    const user = await User.findById(userId).select('balance').lean();
+    if (!user || user.balance < safeReward) {
+      return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
+    }
+    
     const helpRequest = new HelpRequest({
       userId, location, address, problemType, description,
-      reward: reward || 10,
+      reward: safeReward,
       expiresAt: new Date(Date.now() + 60 * 60000)
     });
     await helpRequest.save();
@@ -2451,6 +2543,10 @@ app.post('/api/help-requests/:id/accept', async (req, res) => {
     const { helperId } = req.body;
     const request = await HelpRequest.findById(req.params.id);
     if (!request || request.status !== 'active') return res.status(404).json({ success: false });
+    // Нельзя помогать самому себе
+    if (request.userId.toString() === helperId) {
+      return res.status(400).json({ success: false, message: 'Cannot accept own help request' });
+    }
     request.status = 'accepted';
     request.helperId = helperId;
     await request.save();
@@ -2517,17 +2613,51 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Not enough points' });
     }
     
-    requester.balance -= request.reward;
-    helper.balance += Math.floor(request.reward * 0.75);
+    // Проверка: нельзя помогать самому себе
+    if (request.userId.toString() === request.helperId.toString()) {
+      return res.status(400).json({ success: false, message: 'Cannot help yourself' });
+    }
     
-    await requester.save();
-    await helper.save();
+    // Получаем уровень helper'а для расчёта комиссии
+    const settings = await getGameSettings();
+    let helperLevel = 1;
+    
+    if (settings && settings.levels) {
+      const parkingsGiven = await Parking.countDocuments({ ownerId: request.helperId, status: 'completed' });
+      const totalPoints = helper.totalPointsEarned || helper.balance || 0;
+      
+      for (let i = settings.levels.length - 1; i >= 0; i--) {
+        const lvl = settings.levels[i];
+        if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+          helperLevel = lvl.level;
+          break;
+        }
+      }
+    }
+    
+    // Комиссия по уровням: 1=25%, 2=20%, 3=10%, 4=0%
+    const commissionMap = { 1: 0.25, 2: 0.20, 3: 0.10, 4: 0 };
+    const commissionRate = commissionMap[helperLevel] || 0.25;
+    const helperEarnings = Math.floor(request.reward * (1 - commissionRate));
+    
+    // Атомарное списание с проверкой баланса
+    const deducted = await User.findOneAndUpdate(
+      { _id: request.userId, balance: { $gte: request.reward } },
+      { $inc: { balance: -request.reward } },
+      { new: true }
+    );
+    if (!deducted) {
+      return res.status(400).json({ success: false, message: 'Not enough points' });
+    }
+    
+    // Атомарное начисление помощнику
+    await User.findByIdAndUpdate(request.helperId, { $inc: { balance: helperEarnings } });
     
     request.status = 'completed';
     await request.save();
     
     await Transaction.create({ userId: request.userId, type: 'help_payment', amount: -request.reward, description: 'Help payment' });
-    await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: Math.floor(request.reward * 0.75), description: 'Help reward' });
+    await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: helperEarnings, description: 'Help reward' });
     
     res.json({ success: true });
   } catch (error) {
@@ -2593,13 +2723,18 @@ app.post('/api/parkings/create', async (req, res) => {
   try {
     console.log("CREATE REQ BODY:", req.body);
     const { ownerId, location, address, price, timeToLeave } = req.body;
+    
+    // Валидация: цена 1-100, время 5-120 минут
+    const safePrice = Math.min(Math.max(parseInt(price) || 10, 1), 100);
+    const safeTime = Math.min(Math.max(parseInt(timeToLeave) || 15, 5), 120);
+    
     const existing = await Parking.findOne({ ownerId, status: { $in: ['available', 'booked'] } });
     if (existing) {
       return res.status(400).json({ success: false, message: 'У вас уже есть активная парковка' });
     }
     const owner = await User.findById(ownerId).select('car avatarThumb rating').lean();
     const newParking = new Parking({
-      ownerId, location, address, price, timeToLeave, expiresAt: new Date(Date.now() + timeToLeave * 60000), status: 'available',
+      ownerId, location, address, price: safePrice, timeToLeave: safeTime, expiresAt: new Date(Date.now() + safeTime * 60000), status: 'available',
       ownerCar: owner?.car, ownerAvatar: owner?.avatarThumb, ownerRating: owner?.rating,
       extensionsUsed: 0, messages: []
     });
@@ -2644,11 +2779,40 @@ app.post('/api/parkings/book', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Парковка уже занята' });
     }
 
-    // Списываем баллы атомарно
-    const newBalance = user.balance - parking.price;
-    await User.findByIdAndUpdate(userId, { balance: newBalance });
+    // Списываем баллы АТОМАРНО с проверкой достаточности
+    const deducted = await User.findOneAndUpdate(
+      { _id: userId, balance: { $gte: parking.price } },
+      { $inc: { balance: -parking.price } },
+      { new: true }
+    );
+    if (!deducted) {
+      // Откатываем бронирование если баллов не хватило
+      await Parking.findByIdAndUpdate(parkingId, { status: 'available', bookedBy: null, bookedAt: null, bookerCar: null, bookerName: null, bookerAvatar: null, bookerRating: null });
+      return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
+    }
 
-    const platformFee = Math.ceil(parking.price * 0.25);
+    // Получаем уровень владельца для расчёта комиссии
+    const ownerData = await User.findById(parking.ownerId).select('totalPointsEarned balance').lean();
+    const settings = await getGameSettings();
+    let ownerLevel = 1;
+    
+    if (settings && settings.levels && ownerData) {
+      const parkingsGiven = await Parking.countDocuments({ ownerId: parking.ownerId, status: 'completed' });
+      const totalPoints = ownerData.totalPointsEarned || ownerData.balance || 0;
+      
+      for (let i = settings.levels.length - 1; i >= 0; i--) {
+        const lvl = settings.levels[i];
+        if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+          ownerLevel = lvl.level;
+          break;
+        }
+      }
+    }
+    
+    // Комиссия по уровням: 1=25%, 2=20%, 3=10%, 4=0%
+    const commissionMap = { 1: 0.25, 2: 0.20, 3: 0.10, 4: 0 };
+    const commissionRate = commissionMap[ownerLevel] || 0.25;
+    const platformFee = Math.ceil(parking.price * commissionRate);
     const ownerEarnings = parking.price - platformFee;
 
     // Начисляем владельцу атомарно и получаем только нужные поля
@@ -2660,6 +2824,8 @@ app.post('/api/parkings/book', async (req, res) => {
     
     console.log("=== BOOKING PAYMENT (ATOMIC) ===");
     console.log("Parking ID:", parkingId);
+    console.log("Owner level:", ownerLevel);
+    console.log("Commission rate:", commissionRate * 100 + "%");
     console.log("User paid:", parking.price);
     console.log("Owner earned:", ownerEarnings);
     console.log("Platform fee:", platformFee);
@@ -2815,7 +2981,33 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
 
-    await new Transaction({ userId, type: 'cancellation', amount: 0, description: `Отмена брони: ${parking.address}` }).save();
+    // Проверяем что отменяет именно тот кто забронировал или владелец
+    const bookerId = parking.bookedBy?.toString();
+    const ownerId = parking.ownerId?.toString();
+    if (userId !== bookerId && userId !== ownerId) {
+      return res.status(403).json({ success: false, message: 'Нет доступа' });
+    }
+
+    // Возврат баллов: бронирующему +price, владельцу -ownerEarnings
+    const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
+    if (booking && bookerId) {
+      const refundAmount = booking.price || parking.price;
+      const ownerEarnings = booking.ownerEarnings || Math.floor(refundAmount * 0.75);
+      
+      // Возвращаем баллы бронирующему
+      await User.findByIdAndUpdate(bookerId, { $inc: { balance: refundAmount } });
+      await new Transaction({ userId: bookerId, type: 'cancellation', amount: refundAmount, description: `Возврат за отмену: ${parking.address}` }).save();
+      
+      // Списываем с владельца
+      await User.findByIdAndUpdate(ownerId, { $inc: { balance: -ownerEarnings } });
+      await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Отмена бронирования: ${parking.address}` }).save();
+      
+      // Помечаем бронирование как отменённое
+      booking.status = 'cancelled';
+      await booking.save();
+      
+      console.log(`💸 Refund: booker +${refundAmount}, owner -${ownerEarnings} for parking ${parking.address}`);
+    }
 
     parking.status = 'available';
     parking.bookedBy = null;
@@ -2827,7 +3019,7 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     await parking.save();
     res.json({ success: true });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("CANCEL BOOKING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -2837,12 +3029,39 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
     const { ownerId, reason } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
-    await new Transaction({ userId: ownerId, type: 'cancellation', amount: 0, description: `Владелец отменил: ${parking.address}` }).save();
+    
+    // Проверяем что отменяет именно владелец
+    if (parking.ownerId.toString() !== ownerId) {
+      return res.status(403).json({ success: false, message: 'Нет доступа' });
+    }
+    
+    // Если парковка была забронирована — рефанд бронирующему
+    if (parking.status === 'booked' && parking.bookedBy) {
+      const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
+      if (booking) {
+        const refundAmount = booking.price || parking.price;
+        const ownerEarnings = booking.ownerEarnings || Math.floor(refundAmount * 0.75);
+        
+        await User.findByIdAndUpdate(parking.bookedBy, { $inc: { balance: refundAmount } });
+        await new Transaction({ userId: parking.bookedBy.toString(), type: 'cancellation', amount: refundAmount, description: `Возврат (владелец отменил): ${parking.address}` }).save();
+        
+        await User.findByIdAndUpdate(ownerId, { $inc: { balance: -ownerEarnings } });
+        await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Владелец отменил: ${parking.address}` }).save();
+        
+        booking.status = 'cancelled';
+        await booking.save();
+        
+        console.log(`💸 Owner cancelled booked parking: refund +${refundAmount} to booker, -${ownerEarnings} from owner`);
+      }
+    } else {
+      await new Transaction({ userId: ownerId, type: 'cancellation', amount: 0, description: `Владелец отменил: ${parking.address}` }).save();
+    }
+    
     parking.status = 'cancelled';
     await parking.save();
     res.json({ success: true });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("CANCEL WAITING ERROR:", error);
     res.status(500).json({ success: false });
   }
 });
@@ -2911,7 +3130,8 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     
     if (owner && owner.pushToken) {
       const lang = owner.language || 'en';
-      const ownerEarnings = Math.floor(parking.price * 0.75);
+      // Используем ownerEarnings из booking, так как комиссия уже была рассчитана при бронировании
+      const ownerEarnings = booking?.ownerEarnings || Math.floor(parking.price * 0.75);
       const title = getPushText('completed', 'title', lang);
       const body = getPushText('completed', 'body', lang, { amount: ownerEarnings.toString() });
       sendPushNotification(owner.pushToken, title, body, { type: 'completed', parkingId: parking._id.toString() });
@@ -3377,8 +3597,27 @@ async function createAdminIfNeeded() {
 
 // ==================== GAMIFICATION ====================
 
-// Хелпер: получить сегодняшнюю дату в формате YYYY-MM-DD
-const getTodayDate = () => new Date().toISOString().split('T')[0];
+// Хелпер: получить сегодняшнюю дату в формате YYYY-MM-DD (America/New_York timezone)
+const getTodayDate = () => {
+  const now = new Date();
+  // Конвертируем в NY timezone
+  const nyTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const year = nyTime.getFullYear();
+  const month = String(nyTime.getMonth() + 1).padStart(2, '0');
+  const day = String(nyTime.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+// Хелпер: получить вчерашнюю дату в формате YYYY-MM-DD (America/New_York timezone)
+const getYesterdayDate = () => {
+  const now = new Date();
+  const nyTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  nyTime.setDate(nyTime.getDate() - 1);
+  const year = nyTime.getFullYear();
+  const month = String(nyTime.getMonth() + 1).padStart(2, '0');
+  const day = String(nyTime.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 // Получить уровень пользователя
 app.get('/api/users/:id/level', async (req, res) => {
@@ -3426,7 +3665,17 @@ app.get('/api/users/:id/level', async (req, res) => {
       icon: currentLevel.icon,
       progress,
       totalPoints,
-      parkingsGiven
+      parkingsGiven,
+      // Данные для следующего уровня
+      nextLevel: nextLevel ? {
+        level: nextLevel.level,
+        name: nextLevel.name,
+        icon: nextLevel.icon,
+        minPoints: nextLevel.minPoints,
+        minParkingsGiven: nextLevel.minParkingsGiven,
+        pointsNeeded: nextLevel.minPoints - totalPoints,
+        parkingsNeeded: nextLevel.minParkingsGiven - parkingsGiven
+      } : null
     });
   } catch (error) {
     res.json({ level: 1, progress: 0 });
@@ -3461,9 +3710,7 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
       if (!streak) {
         streak = new UserStreak({ userId, currentStreak: 1, longestStreak: 1, lastActiveDate: today });
       } else {
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayStr = yesterday.toISOString().split('T')[0];
+        const yesterdayStr = getYesterdayDate();
         
         if (streak.lastActiveDate === yesterdayStr) {
           streak.currentStreak += 1;
@@ -3476,6 +3723,9 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
         streak.lastActiveDate = today;
       }
       await streak.save();
+      
+      // Синхронизируем streak с User для achievements
+      await User.findByIdAndUpdate(userId, { currentStreak: streak.currentStreak });
       
       // Отмечаем login задание
       const loginTask = progress.tasks.find(t => t.code === 'daily_login' || t.code === 'login' || t.type === 'login');
@@ -3651,24 +3901,110 @@ app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
 app.get('/api/users/:id/achievements', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
+    if (!user) return res.json([]);
+    
     const configs = await AchievementConfig.find({ isActive: true });
     
-    const achievements = configs.map(config => {
-      const userAch = user?.achievements?.find(a => a.code === config.code);
+    if (!user.achievements) user.achievements = [];
+    
+    const achievements = await Promise.all(configs.map(async (config) => {
+      const userAch = user.achievements.find(a => a.code === config.code);
+      
+      // Определяем текущее значение прогресса по типу условия
+      let currentValue = 0;
+      if (config.condition?.type) {
+        switch (config.condition.type) {
+          case 'parkings_given':
+          case 'parkings_given_night':
+          case 'parkings_given_morning':
+            currentValue = user.parkingsGiven || 0;
+            break;
+          case 'parkings_received':
+            currentValue = user.parkingsReceived || 0;
+            break;
+          case 'streak':
+            currentValue = user.currentStreak || 0;
+            break;
+          case 'rating':
+            currentValue = user.ratingCount || 0;
+            break;
+          case 'helped_newbies':
+            currentValue = user.helpedNewbies || 0;
+            break;
+          case 'referrals':
+            currentValue = user.referralCount || 0;
+            break;
+        }
+      }
+      
+      // Автоматическое разблокирование если условие выполнено
+      let unlocked = !!userAch;
+      let unlockedAt = userAch?.unlockedAt;
+      
+      if (!unlocked && currentValue >= config.condition?.value) {
+        // Атомарно проверяем что достижение ещё не разблокировано и добавляем
+        const atomicResult = await User.findOneAndUpdate(
+          { _id: user._id, 'achievements.code': { $ne: config.code } },
+          { 
+            $push: { achievements: { code: config.code, unlockedAt: new Date() } },
+            $inc: { balance: config.reward, totalPointsEarned: config.reward }
+          },
+          { new: true }
+        );
+        
+        if (atomicResult) {
+          unlocked = true;
+          unlockedAt = new Date();
+          
+          new Transaction({
+            userId: user._id, type: 'achievement', amount: config.reward,
+            description: `Achievement: ${config.code}`
+          }).save().catch(e => console.log('Transaction error:', e));
+          
+          console.log(`🏆 Achievement unlocked: ${config.code} for user ${user._id}, reward: ${config.reward}`);
+        } else {
+          // Уже разблокировано другим запросом
+          unlocked = true;
+        }
+      }
+      
       return {
         code: config.code,
         icon: config.icon,
         name: config.name,
         description: config.description,
+        condition: config.condition,
         reward: config.reward,
-        unlocked: !!userAch,
-        unlockedAt: userAch?.unlockedAt
+        unlocked,
+        unlockedAt,
+        currentValue
       };
-    });
+    }));
+    
+    // needsSave больше не нужен — всё сохраняется атомарно
     
     res.json(achievements);
   } catch (error) {
+    console.log('Achievements error:', error);
     res.json([]);
+  }
+});
+
+// Сбросить достижения пользователя (для исправления дубликатов)
+app.post('/api/admin/reset-user-achievements/:userId', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.json({ success: false, message: 'User not found' });
+    
+    // Сбрасываем достижения
+    user.achievements = [];
+    await user.save();
+    
+    console.log(`✅ Achievements reset for user ${req.params.userId}`);
+    res.json({ success: true, message: 'User achievements reset' });
+  } catch (error) {
+    console.log('Reset user achievements error:', error);
+    res.json({ success: false });
   }
 });
 
@@ -3679,15 +4015,35 @@ app.post('/api/admin/reset-tasks', async (req, res) => {
     await UserDailyProgress.deleteMany({});
     
     await DailyTaskConfig.insertMany([
-      { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
-      { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
-      { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход' }, type: 'login', targetValue: 1, reward: 5 }
+      { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку', uk: 'Віддай парковку', es: 'Cede un lugar' }, type: 'give_parking', targetValue: 1, reward: 10 },
+      { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку', uk: 'Отримай парковку', es: 'Obtén un lugar' }, type: 'receive_parking', targetValue: 1, reward: 5 },
+      { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход', uk: 'Щоденний вхід', es: 'Inicio diario' }, type: 'login', targetValue: 1, reward: 5 }
     ]);
     
     console.log('✅ Tasks reset');
     res.json({ success: true, message: 'Tasks reset' });
   } catch (error) {
     console.log('Reset tasks error:', error);
+    res.json({ success: false });
+  }
+});
+
+// Пересоздать конфиг достижений (для исправления)
+app.post('/api/admin/reset-achievements', async (req, res) => {
+  try {
+    await AchievementConfig.deleteMany({});
+    
+    await AchievementConfig.insertMany([
+      { code: 'first_share', icon: '🎉', name: { en: 'First Share', ru: 'Первая отдача', uk: 'Перша віддача', es: 'Primera cesión' }, description: { en: 'Share your first spot', ru: 'Отдай первую парковку', uk: 'Віддай першу парковку', es: 'Cede tu primer lugar' }, condition: { type: 'parkings_given', value: 1 }, reward: 20 },
+      { code: 'helper_10', icon: '🤝', name: { en: 'Helper', ru: 'Помощник', uk: 'Помічник', es: 'Ayudante' }, description: { en: 'Share 10 spots', ru: 'Отдай 10 парковок', uk: 'Віддай 10 парковок', es: 'Cede 10 lugares' }, condition: { type: 'parkings_given', value: 10 }, reward: 50 },
+      { code: 'streak_7', icon: '🔥', name: { en: 'On Fire', ru: 'В ударе', uk: 'У ударі', es: 'En racha' }, description: { en: '7-day streak', ru: 'Серия 7 дней', uk: 'Серія 7 днів', es: 'Racha de 7 días' }, condition: { type: 'streak', value: 7 }, reward: 50 },
+      { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP', uk: 'VIP', es: 'VIP' }, description: { en: '50+ spots shared', ru: '50+ парковок отдано', uk: '50+ парковок віддано', es: '50+ lugares cedidos' }, condition: { type: 'parkings_given', value: 50 }, reward: 100 }
+    ]);
+    
+    console.log('✅ Achievements reset');
+    res.json({ success: true, message: 'Achievements reset' });
+  } catch (error) {
+    console.log('Reset achievements error:', error);
     res.json({ success: false });
   }
 });
@@ -3700,10 +4056,10 @@ const seedGameData = async () => {
     if (settingsCount === 0) {
       await new GameSettings({
         levels: [
-          { level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', minPoints: 0, minParkingsGiven: 0 },
-          { level: 2, name: { en: 'Driver', ru: 'Водитель' }, icon: '🚙', minPoints: 100, minParkingsGiven: 5 },
-          { level: 3, name: { en: 'Expert', ru: 'Мастер' }, icon: '🏎️', minPoints: 500, minParkingsGiven: 25 },
-          { level: 4, name: { en: 'Legend', ru: 'Легенда' }, icon: '👑', minPoints: 2000, minParkingsGiven: 100 }
+          { level: 1, name: { en: 'Newbie', ru: 'Новичок', uk: 'Новачок', es: 'Novato' }, icon: '🚗', minPoints: 0, minParkingsGiven: 0 },
+          { level: 2, name: { en: 'Driver', ru: 'Водитель', uk: 'Водій', es: 'Conductor' }, icon: '🚙', minPoints: 100, minParkingsGiven: 5 },
+          { level: 3, name: { en: 'Expert', ru: 'Эксперт', uk: 'Експерт', es: 'Experto' }, icon: '🏎️', minPoints: 500, minParkingsGiven: 25 },
+          { level: 4, name: { en: 'Legend', ru: 'Легенда', uk: 'Легенда', es: 'Leyenda' }, icon: '👑', minPoints: 2000, minParkingsGiven: 100 }
         ],
         streakBonuses: [
           { day: 1, bonus: 5 },
@@ -3721,9 +4077,9 @@ const seedGameData = async () => {
     const taskCount = await DailyTaskConfig.countDocuments();
     if (taskCount === 0) {
       await DailyTaskConfig.insertMany([
-        { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку' }, type: 'give_parking', targetValue: 1, reward: 10 },
-        { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку' }, type: 'receive_parking', targetValue: 1, reward: 5 },
-        { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход' }, type: 'login', targetValue: 1, reward: 5 }
+        { code: 'give_parking', icon: '🅿️', name: { en: 'Share a spot', ru: 'Отдай парковку', uk: 'Віддай парковку', es: 'Cede un lugar' }, type: 'give_parking', targetValue: 1, reward: 10 },
+        { code: 'receive_parking', icon: '🚗', name: { en: 'Get a spot', ru: 'Получи парковку', uk: 'Отримай парковку', es: 'Obtén un lugar' }, type: 'receive_parking', targetValue: 1, reward: 5 },
+        { code: 'daily_login', icon: '👋', name: { en: 'Daily check-in', ru: 'Ежедневный вход', uk: 'Щоденний вхід', es: 'Inicio diario' }, type: 'login', targetValue: 1, reward: 5 }
       ]);
       console.log('✅ Daily tasks created');
     }
@@ -3732,10 +4088,10 @@ const seedGameData = async () => {
     const achCount = await AchievementConfig.countDocuments();
     if (achCount === 0) {
       await AchievementConfig.insertMany([
-        { code: 'first_share', icon: '🎉', name: { en: 'First Share', ru: 'Первая отдача' }, description: { en: 'Share your first spot', ru: 'Отдай первую парковку' }, condition: { type: 'parkings_given', value: 1 }, reward: 20 },
-        { code: 'helper_10', icon: '🤝', name: { en: 'Helper', ru: 'Помощник' }, description: { en: 'Share 10 spots', ru: 'Отдай 10 парковок' }, condition: { type: 'parkings_given', value: 10 }, reward: 50 },
-        { code: 'streak_7', icon: '🔥', name: { en: 'On Fire', ru: 'В ударе' }, description: { en: '7-day streak', ru: 'Серия 7 дней' }, condition: { type: 'streak', value: 7 }, reward: 50 },
-        { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP' }, description: { en: '50+ spots shared', ru: '50+ парковок отдано' }, condition: { type: 'parkings_given', value: 50 }, reward: 100 }
+        { code: 'first_share', icon: '🎉', name: { en: 'First Share', ru: 'Первая отдача', uk: 'Перша віддача', es: 'Primera cesión' }, description: { en: 'Share your first spot', ru: 'Отдай первую парковку', uk: 'Віддай першу парковку', es: 'Cede tu primer lugar' }, condition: { type: 'parkings_given', value: 1 }, reward: 20 },
+        { code: 'helper_10', icon: '🤝', name: { en: 'Helper', ru: 'Помощник', uk: 'Помічник', es: 'Ayudante' }, description: { en: 'Share 10 spots', ru: 'Отдай 10 парковок', uk: 'Віддай 10 парковок', es: 'Cede 10 lugares' }, condition: { type: 'parkings_given', value: 10 }, reward: 50 },
+        { code: 'streak_7', icon: '🔥', name: { en: 'On Fire', ru: 'В ударе', uk: 'У ударі', es: 'En racha' }, description: { en: '7-day streak', ru: 'Серия 7 дней', uk: 'Серія 7 днів', es: 'Racha de 7 días' }, condition: { type: 'streak', value: 7 }, reward: 50 },
+        { code: 'vip', icon: '👑', name: { en: 'VIP', ru: 'VIP', uk: 'VIP', es: 'VIP' }, description: { en: '50+ spots shared', ru: '50+ парковок отдано', uk: '50+ парковок віддано', es: '50+ lugares cedidos' }, condition: { type: 'parkings_given', value: 50 }, reward: 100 }
       ]);
       console.log('✅ Achievements created');
     }

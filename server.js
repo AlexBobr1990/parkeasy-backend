@@ -147,8 +147,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Endpoint для просмотра логов через браузер
-app.get('/api/debug/logs', (req, res) => {
+// Endpoint для просмотра логов — только с ADMIN_SECRET
+app.get('/api/debug/logs', async (req, res) => {
+  const secret = req.headers['x-admin-secret'] || req.query.secret;
+  if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   res.json(requestLog);
 });
 
@@ -678,7 +682,7 @@ app.post('/api/auth/register', rateLimit('register', 5, 3600000), async (req, re
   }
 });
 
-app.post('/api/auth/verify-email', async (req, res) => {
+app.post('/api/auth/verify-email', rateLimit('verify-email', 10, 900000), async (req, res) => {
   try {
     const { email, code } = req.body;
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -735,7 +739,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
   }
 });
 
-app.post('/api/auth/resend-verification', async (req, res) => {
+app.post('/api/auth/resend-verification', rateLimit('resend-verify', 3, 3600000), async (req, res) => {
   try {
     const { email } = req.body;
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -764,7 +768,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
 });
 
 // Forgot password - send reset code
-app.post("/api/auth/forgot-password", async (req, res) => {
+app.post("/api/auth/forgot-password", rateLimit('forgot-pw', 5, 3600000), async (req, res) => {
   try {
     const { email } = req.body;
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -795,7 +799,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 });
 
 // Reset password with code
-app.post("/api/auth/reset-password", async (req, res) => {
+app.post("/api/auth/reset-password", rateLimit('reset-pw', 10, 900000), async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -1220,6 +1224,18 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
 app.post('/api/friends/message', async (req, res) => {
   try {
     const { fromUserId, toUserId, text } = req.body;
+    
+    // Проверяем что они друзья
+    const friendship = await Friendship.findOne({
+      $or: [
+        { user1: fromUserId, user2: toUserId },
+        { user1: toUserId, user2: fromUserId }
+      ],
+      status: 'accepted'
+    });
+    if (!friendship) {
+      return res.status(403).json({ success: false, message: 'Not friends' });
+    }
     
     // Проверяем блокировку
     const blocked = await BlockedUser.findOne({
@@ -2108,6 +2124,7 @@ app.post('/api/admin/recalculate-ratings', async (req, res) => {
 app.delete('/api/users/:id/account', async (req, res) => {
   try {
     const userId = req.params.id;
+    const { password } = req.body;
     
     // Проверяем валидность ObjectId
     if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -2118,6 +2135,17 @@ app.delete('/api/users/:id/account', async (req, res) => {
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Для email-аккаунтов требуем пароль
+    if (user.password && !user.googleId && !user.appleId) {
+      if (!password) {
+        return res.status(400).json({ success: false, message: 'Password required' });
+      }
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(403).json({ success: false, message: 'Wrong password' });
+      }
     }
     
     // Отменяем активные парковки пользователя
@@ -2214,22 +2242,32 @@ app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => 
   }
 });
 
-app.post('/api/auth/google', async (req, res) => {
+app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, res) => {
   try {
     const { googleId, email, name, avatar } = req.body;
     
-    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
+    if (!googleId || !email) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+    
+    // Ищем ТОЛЬКО по googleId (не по email — чтобы не захватить чужой email-аккаунт)
+    let user = await User.findOne({ googleId });
+    
+    if (!user) {
+      // Проверяем нет ли email-аккаунта с таким email
+      const existingByEmail = await User.findOne({ email: email.toLowerCase() });
+      if (existingByEmail && !existingByEmail.googleId) {
+        // Email занят обычным аккаунтом — нельзя автоматически привязывать
+        return res.status(400).json({ success: false, message: 'Account with this email already exists. Please login with email and password.' });
+      }
+      if (existingByEmail && existingByEmail.googleId === googleId) {
+        user = existingByEmail;
+      }
+    }
     
     if (user) {
-      // Generate referral code if missing
       if (!user.referralCode) {
         user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
-        await user.save();
-      }
-      // Обновляем googleId если пользователь существует
-      if (!user.googleId) {
-        user.googleId = googleId;
-        user.authProvider = 'google';
         await user.save();
       }
     } else {
@@ -2279,21 +2317,30 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-app.post('/api/auth/apple', async (req, res) => {
+app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res) => {
   try {
     const { appleId, email, name } = req.body;
     
-    let user = await User.findOne({ $or: [{ appleId }, { email: email?.toLowerCase() }] });
+    if (!appleId) {
+      return res.status(400).json({ success: false, message: 'Missing appleId' });
+    }
+    
+    // Ищем ТОЛЬКО по appleId
+    let user = await User.findOne({ appleId });
+    
+    if (!user && email) {
+      const existingByEmail = await User.findOne({ email: email.toLowerCase() });
+      if (existingByEmail && !existingByEmail.appleId) {
+        return res.status(400).json({ success: false, message: 'Account with this email already exists. Please login with email and password.' });
+      }
+      if (existingByEmail && existingByEmail.appleId === appleId) {
+        user = existingByEmail;
+      }
+    }
     
     if (user) {
-      // Generate referral code if missing
       if (!user.referralCode) {
         user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
-        await user.save();
-      }
-      if (!user.appleId) {
-        user.appleId = appleId;
-        user.authProvider = 'apple';
         await user.save();
       }
     } else {
@@ -2418,9 +2465,10 @@ app.get('/api/users/:id/balance', async (req, res) => {
 
 app.get('/api/users/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).lean();
+    const user = await User.findById(req.params.id)
+      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -__v')
+      .lean();
     if (!user) return res.status(404).json(null);
-    // Добавляем id как строку для совместимости с фронтендом
     res.json({ ...user, id: user._id.toString() });
   } catch (error) {
     console.log("GET USER ERROR:", error);
@@ -2434,16 +2482,27 @@ app.put("/api/users/:id", async (req, res) => {
     const { car, avatar, language } = req.body;
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    
+    // Разрешаем менять ТОЛЬКО безопасные поля
     if (car) user.car = car;
     if (avatar) {
       user.avatar = avatar;
-      // Создаём миниатюру
       user.avatarThumb = await createThumbnail(avatar, 80);
     }
     if (language) user.language = language;
     if (req.body.lastLocation) user.lastLocation = req.body.lastLocation;
+    // НЕ разрешаем: balance, isAdmin, email, password, referralCode, etc.
     await user.save();
-    res.json({ success: true, user });
+    
+    // Не возвращаем sensitive данные
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    delete safeUser.pushToken;
+    delete safeUser.googleId;
+    delete safeUser.appleId;
+    delete safeUser.verificationCode;
+    delete safeUser.resetCode;
+    res.json({ success: true, user: safeUser });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server error" });
   }
@@ -2460,11 +2519,14 @@ app.post('/api/users/:id/update-location', async (req, res) => {
 });
 
 // Save push token
-app.post('/api/users/:id/push-token', async (req, res) => {
+app.post('/api/users/:id/push-token', rateLimit('push-token', 5, 3600000), async (req, res) => {
   try {
-    const { pushToken } = req.body;
+    const { pushToken, callerUserId } = req.body;
+    // Проверка: callerUserId должен совпадать с :id
+    if (callerUserId && callerUserId !== req.params.id) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     await User.findByIdAndUpdate(req.params.id, { pushToken });
-    console.log('Push token saved for user:', req.params.id);
     res.json({ success: true });
   } catch (error) {
     res.json({ success: false });
@@ -2518,7 +2580,7 @@ app.post('/api/help-requests/create', async (req, res) => {
     const { userId, location, address, problemType, description, reward } = req.body;
     
     // Лимит награды: максимум 50 баллов
-    const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 50);
+    const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 100);
     
     // Проверяем баланс
     const user = await User.findById(userId).select('balance').lean();
@@ -2849,7 +2911,7 @@ app.post('/api/parkings/book', async (req, res) => {
     }
 
     res.json({
-      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance,
+      success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: deducted.balance,
       parking: { ...parking.toObject(),
         bookingId: booking?._id, ownerName: owner?.name, ownerCar: owner?.car, ownerAvatar: owner?.avatarThumb, ownerRating: owner?.rating },
       bookingId: booking._id
@@ -2937,11 +2999,20 @@ app.get('/api/users/:id/completed-bookings', async (req, res) => {
 
 app.post('/api/parkings/:id/extend', async (req, res) => {
   try {
-    const { minutes } = req.body;
+    const { minutes, userId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка владельца (если передан userId)
+    if (userId && parking.ownerId.toString() !== userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     if (parking.extensionsUsed >= 2) return res.status(400).json({ success: false, message: 'Лимит продлений' });
-    parking.expiresAt = new Date(parking.expiresAt.getTime() + minutes * 60000);
+    
+    // Лимит: максимум 30 минут за раз
+    const safeMinutes = Math.min(Math.max(parseInt(minutes) || 10, 1), 30);
+    parking.expiresAt = new Date(parking.expiresAt.getTime() + safeMinutes * 60000);
     parking.extensionsUsed += 1;
     await parking.save();
     res.json({ success: true, parking });
@@ -2953,7 +3024,17 @@ app.post('/api/parkings/:id/extend', async (req, res) => {
 
 app.put('/api/parkings/:id/comment', async (req, res) => {
   try {
-    await Parking.findByIdAndUpdate(req.params.id, { comment: req.body.comment });
+    const { comment, userId } = req.body;
+    const parking = await Parking.findById(req.params.id);
+    if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка владельца
+    if (userId && parking.ownerId.toString() !== userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    parking.comment = comment;
+    await parking.save();
     res.json({ success: true });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -2965,6 +3046,13 @@ app.delete('/api/parkings/:id', async (req, res) => {
   try {
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка владельца (если передан userId)
+    const userId = req.query.userId || req.body?.userId;
+    if (userId && parking.ownerId.toString() !== userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     if (parking.status === 'booked') return res.status(400).json({ success: false, message: 'Нельзя отменить забронированную парковку' });
     parking.status = 'cancelled';
     await parking.save();
@@ -3078,8 +3166,20 @@ app.post('/api/parkings/:id/update-location', async (req, res) => {
 
 app.post('/api/parkings/:id/arrived', async (req, res) => {
   try {
+    const { userId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка: только бронирующий может отметить приезд
+    if (userId && userId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    // Проверка: парковка должна быть забронирована
+    if (parking.status !== 'booked') {
+      return res.status(400).json({ success: false, message: 'Parking is not booked' });
+    }
+    
     parking.arrivedAt = new Date();
     await parking.save();
     
@@ -3103,8 +3203,20 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
 
 app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
   try {
+    const { userId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка: только владелец или бронирующий может завершить сделку
+    if (userId && userId !== parking.ownerId?.toString() && userId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    // Проверка: парковка должна быть в статусе booked
+    if (parking.status !== 'booked') {
+      return res.status(400).json({ success: false, message: 'Parking is not booked' });
+    }
+    
     parking.confirmedAt = new Date();
     parking.status = 'completed';
     await parking.save();
@@ -3204,6 +3316,12 @@ app.post('/api/parkings/:id/messages', async (req, res) => {
     const { userId, text, isOwner } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
+    
+    // Проверка: только владелец или бронирующий могут писать
+    if (userId !== parking.ownerId?.toString() && userId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     const user = await User.findById(userId);
     parking.messages = parking.messages || [];
     parking.messages.push({
@@ -3235,7 +3353,16 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
     const { minutes, fromUserId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
-    parking.waitRequest = { minutes, fromUserId, createdAt: new Date() };
+    
+    // Проверка: только участники
+    if (fromUserId !== parking.ownerId?.toString() && fromUserId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    // Лимит: максимум 15 минут
+    const safeMinutes = Math.min(Math.max(parseInt(minutes) || 5, 1), 15);
+    
+    parking.waitRequest = { minutes: safeMinutes, fromUserId, createdAt: new Date() };
     await parking.save();
     
     // Push notification - wait request (только нужные поля)
@@ -3281,7 +3408,8 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
 
 app.post("/api/admin/clear-users", async (req, res) => {
   try {
-    const result = await User.deleteMany({ email: { $ne: "admin@test.com" } });
+    // Удаляем всех кроме админов
+    const result = await User.deleteMany({ isAdmin: { $ne: true } });
     await Transaction.deleteMany({ userId: { $ne: null } });
     res.json({ success: true, deleted: result.deletedCount });
   } catch (error) {
@@ -3507,6 +3635,10 @@ app.post('/api/admin/migrate-parking-avatars', async (req, res) => {
 // ==================== DEBUG ====================
 
 app.get('/api/debug/transactions', async (req, res) => {
+  const secret = req.headers['x-admin-secret'] || req.query.secret;
+  if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   try {
     const all = await Transaction.find({}).sort({ createdAt: -1 }).limit(20);
     res.json({ count: all.length, transactions: all });

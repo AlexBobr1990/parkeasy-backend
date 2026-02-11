@@ -2530,7 +2530,7 @@ app.post('/api/users/:id/push-token', rateLimit('push-token', 5, 3600000), async
   try {
     const { pushToken, callerUserId } = req.body;
     // Проверка: callerUserId должен совпадать с :id
-    if (callerUserId && callerUserId !== req.params.id) {
+    if (!callerUserId || callerUserId !== req.params.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     await User.findByIdAndUpdate(req.params.id, { pushToken });
@@ -2668,8 +2668,19 @@ app.get('/api/users/:id/my-help-request', async (req, res) => {
 
 app.post('/api/help-requests/:id/complete', async (req, res) => {
   try {
+    const { callerUserId } = req.body;
     const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
+    
+    // Фикс: проверка статуса — только accepted можно завершить
+    if (request.status !== 'accepted') {
+      return res.status(400).json({ success: false, message: 'Request is not in accepted status' });
+    }
+    
+    // Фикс: проверка что вызывает участник сделки
+    if (!callerUserId || (callerUserId !== request.userId.toString() && callerUserId !== request.helperId.toString())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     
     const requester = await User.findById(request.userId);
     const helper = await User.findById(request.helperId);
@@ -3093,8 +3104,20 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
       await User.findByIdAndUpdate(bookerId, { $inc: { balance: refundAmount } });
       await new Transaction({ userId: bookerId, type: 'cancellation', amount: refundAmount, description: `Возврат за отмену: ${parking.address}` }).save();
       
-      // Списываем с владельца
-      await User.findByIdAndUpdate(ownerId, { $inc: { balance: -ownerEarnings } });
+      // Списываем с владельца (атомарно, не уходим в минус)
+      const ownerDeducted = await User.findOneAndUpdate(
+        { _id: ownerId, balance: { $gte: ownerEarnings } },
+        { $inc: { balance: -ownerEarnings } },
+        { new: true }
+      );
+      if (!ownerDeducted) {
+        // Если не хватает — списываем что есть (до нуля)
+        const ownerNow = await User.findById(ownerId).select('balance').lean();
+        const deductable = Math.min(ownerNow?.balance || 0, ownerEarnings);
+        if (deductable > 0) {
+          await User.findByIdAndUpdate(ownerId, { $inc: { balance: -deductable } });
+        }
+      }
       await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Отмена бронирования: ${parking.address}` }).save();
       
       // Помечаем бронирование как отменённое
@@ -3140,7 +3163,19 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
         await User.findByIdAndUpdate(parking.bookedBy, { $inc: { balance: refundAmount } });
         await new Transaction({ userId: parking.bookedBy.toString(), type: 'cancellation', amount: refundAmount, description: `Возврат (владелец отменил): ${parking.address}` }).save();
         
-        await User.findByIdAndUpdate(ownerId, { $inc: { balance: -ownerEarnings } });
+        // Списываем с владельца (атомарно, не уходим в минус)
+        const ownerDeducted = await User.findOneAndUpdate(
+          { _id: ownerId, balance: { $gte: ownerEarnings } },
+          { $inc: { balance: -ownerEarnings } },
+          { new: true }
+        );
+        if (!ownerDeducted) {
+          const ownerNow = await User.findById(ownerId).select('balance').lean();
+          const deductable = Math.min(ownerNow?.balance || 0, ownerEarnings);
+          if (deductable > 0) {
+            await User.findByIdAndUpdate(ownerId, { $inc: { balance: -deductable } });
+          }
+        }
         await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Владелец отменил: ${parking.address}` }).save();
         
         booking.status = 'cancelled';
@@ -3920,7 +3955,7 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     const { callerUserId } = req.body;
     
     // Проверка: только сам пользователь может клеймить свои задания
-    if (callerUserId && callerUserId !== userId) {
+    if (!callerUserId || callerUserId !== userId) {
       return res.status(403).json({ success: false, reason: 'access_denied' });
     }
     
@@ -3977,7 +4012,7 @@ app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
     const { callerUserId } = req.body;
     
     // Проверка: только сам пользователь
-    if (callerUserId && callerUserId !== userId) {
+    if (!callerUserId || callerUserId !== userId) {
       return res.status(403).json({ success: false, reason: 'access_denied' });
     }
     
@@ -4029,7 +4064,7 @@ app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
     const { callerUserId } = req.body;
     
     // Проверка: только сам пользователь
-    if (callerUserId && callerUserId !== userId) {
+    if (!callerUserId || callerUserId !== userId) {
       return res.status(403).json({ success: false, reason: 'access_denied' });
     }
     

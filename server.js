@@ -208,6 +208,7 @@ const userSchema = new mongoose.Schema({
   referralCode: { type: String, unique: true },
   referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   referralCount: { type: Number, default: 0 },
+  referralEarnings: { type: Number, default: 0 },
   
   // Рейтинг
   rating: { type: Number, default: 5.0 },
@@ -306,7 +307,7 @@ const bookingSchema = new mongoose.Schema({
 
 const transactionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'help_payment', 'help_reward', 'daily_task', 'streak_bonus', 'achievement'], required: true },
+  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'referral_passive', 'help_payment', 'help_reward', 'daily_task', 'streak_bonus', 'achievement'], required: true },
   amount: { type: Number, required: true },
   description: { type: String, required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -481,6 +482,19 @@ const helpRequestSchema = new mongoose.Schema({
 const HelpRequest = mongoose.model('HelpRequest', helpRequestSchema);
 
 // ==================== HELPERS ====================
+
+// Начисление реферального пассивного дохода (1 балл рефереру за каждую завершённую сделку реферала)
+async function creditReferralPassive(userId, description) {
+  try {
+    const user = await User.findById(userId).select('referredBy name').lean();
+    if (!user || !user.referredBy) return;
+    await User.findByIdAndUpdate(user.referredBy, { $inc: { balance: 1, referralEarnings: 1 } });
+    await new Transaction({ userId: user.referredBy, type: 'referral_passive', amount: 1, description: `Реферал ${user.name}: ${description}` }).save();
+    console.log(`💎 Referral passive +1 to referrer of ${user.name}`);
+  } catch (err) {
+    console.log('Referral passive error:', err.message);
+  }
+}
 
 // Кэш для GameSettings (не меняется часто)
 let cachedGameSettings = null;
@@ -843,6 +857,32 @@ app.get('/api/referral/check/:code', async (req, res) => {
   } catch (error) {
     console.log("CHECK REFERRAL ERROR:", error);
     res.json({ valid: false });
+  }
+});
+
+// Статистика реферальной программы
+app.get('/api/users/:id/referral-stats', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId).select('referralCount referralEarnings').lean();
+    if (!user) return res.json({ count: 0, earnings: 0, referrals: [] });
+    
+    const referrals = await User.find({ referredBy: userId })
+      .select('name avatarThumb parkingsGiven parkingsReceived createdAt')
+      .sort({ createdAt: -1 }).limit(50).lean();
+    
+    res.json({
+      count: user.referralCount || 0,
+      earnings: user.referralEarnings || 0,
+      referrals: referrals.map(r => ({
+        name: r.name,
+        avatar: r.avatarThumb,
+        deals: (r.parkingsGiven || 0) + (r.parkingsReceived || 0),
+        joinedAt: r.createdAt
+      }))
+    });
+  } catch (error) {
+    res.json({ count: 0, earnings: 0, referrals: [] });
   }
 });
 
@@ -2739,6 +2779,9 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     await Transaction.create({ userId: request.userId, type: 'help_payment', amount: -request.reward, description: 'Help payment' });
     await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: helperEarnings, description: 'Help reward' });
     
+    // Реферальный пассивный доход
+    creditReferralPassive(request.helperId, 'помощь');
+    
     res.json({ success: true });
   } catch (error) {
     console.log('HELP COMPLETE ERROR:', error);
@@ -3306,6 +3349,10 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
         { $inc: { exchangeCount: 1 } }
       )
     ]);
+    
+    // Реферальный пассивный доход (+1 балл рефереру за сделку)
+    creditReferralPassive(parking.bookedBy, 'парковка');
+    creditReferralPassive(parking.ownerId, 'парковка');
     
     // Обновляем прогресс заданий
     const today = new Date().toISOString().split('T')[0];

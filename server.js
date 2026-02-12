@@ -864,7 +864,7 @@ app.get('/api/referral/check/:code', async (req, res) => {
 app.get('/api/users/:id/referral-stats', async (req, res) => {
   try {
     const userId = req.params.id;
-    const user = await User.findById(userId).select('referralCount referralEarnings').lean();
+    const user = await User.findById(userId).select('referralEarnings').lean();
     if (!user) return res.json({ count: 0, earnings: 0, referrals: [] });
     
     const referrals = await User.find({ referredBy: userId })
@@ -872,7 +872,7 @@ app.get('/api/users/:id/referral-stats', async (req, res) => {
       .sort({ createdAt: -1 }).limit(50).lean();
     
     res.json({
-      count: user.referralCount || 0,
+      count: referrals.length,
       earnings: user.referralEarnings || 0,
       referrals: referrals.map(r => ({
         name: r.name,

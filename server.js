@@ -541,14 +541,38 @@ const sendVerificationEmail = async (email, code) => {
 
 
 
-mongoose.connect(MONGODB_URI)
-  .then(() => {
+// MongoDB connection with auto-reconnect
+mongoose.connect(MONGODB_URI, {
+  serverSelectionTimeoutMS: 15000,   // Таймаут выбора сервера: 15 сек (вместо 30)
+  heartbeatFrequencyMS: 10000,       // Проверка соединения каждые 10 сек
+  socketTimeoutMS: 45000,            // Таймаут сокета: 45 сек
+  maxPoolSize: 10,                   // Макс. соединений в пуле
+  retryWrites: true,
+  retryReads: true,
+}).then(() => {
     console.log('✅ MongoDB подключена!');
     createAdminIfNeeded();
     seedGameData();
     createIndexes();
   })
   .catch(err => console.error('❌ Ошибка MongoDB:', err));
+
+// MongoDB event listeners — мониторинг состояния соединения
+mongoose.connection.on('connected', () => {
+  console.log('🟢 MongoDB connected');
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('🟡 MongoDB disconnected — mongoose will auto-reconnect');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('🔴 MongoDB connection error:', err.message);
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('🟢 MongoDB reconnected successfully');
+});
 
 // Создание индексов для оптимизации запросов
 async function createIndexes() {
@@ -599,6 +623,28 @@ setInterval(async () => {
 }, 60000);
 
 // ==================== ROUTES ====================
+
+// Health check — Railway uses this to detect if app is alive
+app.get('/health', (req, res) => {
+  const mongoState = mongoose.connection.readyState;
+  // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+  const stateNames = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  
+  if (mongoState === 1) {
+    res.status(200).json({ 
+      status: 'ok', 
+      mongo: stateNames[mongoState],
+      uptime: Math.floor(process.uptime()) + 's',
+      memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB'
+    });
+  } else {
+    res.status(503).json({ 
+      status: 'degraded', 
+      mongo: stateNames[mongoState] || 'unknown',
+      uptime: Math.floor(process.uptime()) + 's'
+    });
+  }
+});
 
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'ParkBro API is running!', version: '2.0' });
@@ -4344,6 +4390,41 @@ const seedGameData = async () => {
 
 // ==================== START ====================
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚗 ParkBro API running on port ${PORT}`);
+  console.log('✅ Сервер готов');
+});
+
+// Graceful shutdown — корректное завершение при перезапуске Railway
+const gracefulShutdown = async (signal) => {
+  console.log(`\n⚠️ ${signal} received — shutting down gracefully...`);
+  
+  // Перестаём принимать новые подключения
+  server.close(() => {
+    console.log('🔒 HTTP server closed');
+  });
+  
+  // Закрываем MongoDB
+  try {
+    await mongoose.connection.close();
+    console.log('🔒 MongoDB connection closed');
+  } catch (err) {
+    console.error('Error closing MongoDB:', err.message);
+  }
+  
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Ловим необработанные ошибки — логируем но не крашим
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection:', reason?.message || reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('🔴 Uncaught Exception:', err.message);
+  // Даём серверу секунду на завершение текущих запросов
+  setTimeout(() => process.exit(1), 1000);
 });

@@ -4443,6 +4443,43 @@ const seedGameData = async () => {
   }
 };
 
+// ==================== REFERRAL LANDING ====================
+
+// Публичный endpoint — информация о реферере по коду (для лендинга)
+app.get('/api/referral/:code', async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+    const user = await User.findOne({ referralCode: code })
+      .select('name avatarThumb rating ratingCount parkingsGiven parkingsReceived createdAt')
+      .lean();
+    
+    if (!user) {
+      return res.json({ success: false, message: 'Referral code not found' });
+    }
+    
+    res.json({
+      success: true,
+      referrer: {
+        name: user.name,
+        avatar: user.avatarThumb || null,
+        rating: user.rating || 5.0,
+        ratingCount: user.ratingCount || 0,
+        parkingsGiven: user.parkingsGiven || 0,
+        parkingsReceived: user.parkingsReceived || 0,
+        memberSince: user.createdAt,
+      },
+      bonuses: {
+        newUser: 70,
+        referrer: 20,
+      },
+      code,
+    });
+  } catch (error) {
+    console.log('Referral lookup error:', error.message);
+    res.json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== BOOKING RADIUS SETTINGS ====================
 
 // Публичный endpoint — приложение получает текущий радиус

@@ -481,6 +481,44 @@ const helpRequestSchema = new mongoose.Schema({
 });
 const HelpRequest = mongoose.model('HelpRequest', helpRequestSchema);
 
+// ==================== APP SETTINGS ====================
+const appSettingsSchema = new mongoose.Schema({
+  bookingRadiusKm: { type: Number, default: 5 },
+  updatedAt: { type: Date, default: Date.now }
+});
+const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
+
+// Кэш для AppSettings
+let cachedAppSettings = null;
+let appSettingsCacheTime = 0;
+const APP_SETTINGS_CACHE_TTL = 60 * 1000; // 1 минута
+
+async function getAppSettings() {
+  const now = Date.now();
+  if (cachedAppSettings && (now - appSettingsCacheTime) < APP_SETTINGS_CACHE_TTL) {
+    return cachedAppSettings;
+  }
+  let settings = await AppSettings.findOne().lean();
+  if (!settings) {
+    settings = await new AppSettings({ bookingRadiusKm: 5 }).save();
+    settings = settings.toObject();
+  }
+  cachedAppSettings = settings;
+  appSettingsCacheTime = now;
+  return cachedAppSettings;
+}
+
+// ==================== HAVERSINE ====================
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 // ==================== HELPERS ====================
 
 // Начисление реферального пассивного дохода (1 балл рефереру за каждую завершённую сделку реферала)
@@ -2917,16 +2955,33 @@ app.post('/api/parkings/create', async (req, res) => {
 
 app.post('/api/parkings/book', async (req, res) => {
   try {
-    const { parkingId, userId } = req.body;
+    const { parkingId, userId, userLocation } = req.body;
     
     // Предварительные проверки - только нужные поля!
-    const user = await User.findById(userId).select('name balance car avatarThumb rating').lean();
+    const user = await User.findById(userId).select('name balance car avatarThumb rating lastLocation').lean();
     if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
     
     const parkingCheck = await Parking.findById(parkingId);
     if (!parkingCheck) return res.status(404).json({ success: false, message: 'Парковка не найдена' });
     if (parkingCheck.ownerId.toString() === userId) return res.status(400).json({ success: false, message: 'Нельзя забронировать свою парковку' });
     if (user.balance < parkingCheck.price) return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
+
+    // ✅ Проверка радиуса бронирования
+    const appSettings = await getAppSettings();
+    const radiusKm = appSettings.bookingRadiusKm || 5;
+    const loc = userLocation || user.lastLocation;
+    if (loc && loc.lat && loc.lng && parkingCheck.location) {
+      const dist = haversineKm(loc.lat, loc.lng, parkingCheck.location.lat, parkingCheck.location.lng);
+      if (dist > radiusKm) {
+        return res.status(400).json({ 
+          success: false, 
+          message: `Парковка слишком далеко (${dist.toFixed(1)} км). Максимальный радиус: ${radiusKm} км`,
+          code: 'TOO_FAR',
+          distance: Math.round(dist * 10) / 10,
+          maxRadius: radiusKm
+        });
+      }
+    }
 
     // ✅ АТОМАРНАЯ ОПЕРАЦИЯ: бронируем только если status === 'available'
     const parking = await Parking.findOneAndUpdate(
@@ -4387,6 +4442,54 @@ const seedGameData = async () => {
     console.log('Seed game data error:', error.message);
   }
 };
+
+// ==================== BOOKING RADIUS SETTINGS ====================
+
+// Публичный endpoint — приложение получает текущий радиус
+app.get('/api/settings/booking-radius', async (req, res) => {
+  try {
+    const settings = await getAppSettings();
+    res.json({ success: true, bookingRadiusKm: settings.bookingRadiusKm || 5 });
+  } catch (error) {
+    res.json({ success: true, bookingRadiusKm: 5 });
+  }
+});
+
+// Admin endpoint — изменить радиус
+app.put('/api/admin/settings/booking-radius', async (req, res) => {
+  try {
+    const { bookingRadiusKm } = req.body;
+    const radius = Math.max(1, Math.min(50, Number(bookingRadiusKm) || 5));
+    
+    let settings = await AppSettings.findOne();
+    if (!settings) {
+      settings = new AppSettings({ bookingRadiusKm: radius });
+    } else {
+      settings.bookingRadiusKm = radius;
+      settings.updatedAt = new Date();
+    }
+    await settings.save();
+    
+    // Сброс кэша
+    cachedAppSettings = null;
+    appSettingsCacheTime = 0;
+    
+    console.log(`📏 Booking radius updated to ${radius} km`);
+    res.json({ success: true, bookingRadiusKm: radius });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin endpoint — получить все app settings
+app.get('/api/admin/settings/app', async (req, res) => {
+  try {
+    const settings = await getAppSettings();
+    res.json({ success: true, settings });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 // ==================== START ====================
 

@@ -4455,10 +4455,22 @@ app.get('/api/settings/booking-radius', async (req, res) => {
   }
 });
 
-// Admin endpoint — изменить радиус
-app.put('/api/admin/settings/booking-radius', async (req, res) => {
+// Admin endpoint — изменить радиус (вне /api/admin/ чтобы не блокировался middleware)
+app.put('/api/settings/booking-radius', async (req, res) => {
   try {
-    const { bookingRadiusKm } = req.body;
+    const { bookingRadiusKm, adminId } = req.body;
+    
+    // Проверка админ-доступа
+    if (adminId) {
+      const admin = await User.findById(adminId).select('isAdmin').lean();
+      if (!admin?.isAdmin) return res.status(403).json({ success: false, message: 'Admin access denied' });
+    } else {
+      const secret = req.headers['x-admin-secret'] || req.query.secret;
+      if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+        return res.status(403).json({ success: false, message: 'Admin access denied' });
+      }
+    }
+    
     const radius = Math.max(1, Math.min(50, Number(bookingRadiusKm) || 5));
     
     let settings = await AppSettings.findOne();
@@ -4476,16 +4488,6 @@ app.put('/api/admin/settings/booking-radius', async (req, res) => {
     
     console.log(`📏 Booking radius updated to ${radius} km`);
     res.json({ success: true, bookingRadiusKm: radius });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Admin endpoint — получить все app settings
-app.get('/api/admin/settings/app', async (req, res) => {
-  try {
-    const settings = await getAppSettings();
-    res.json({ success: true, settings });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

@@ -660,6 +660,19 @@ setInterval(async () => {
   }
 }, 60000);
 
+// Memory monitoring — логируем каждые 5 минут чтобы видеть утечки
+setInterval(() => {
+  const mem = process.memoryUsage();
+  const rss = Math.round(mem.rss / 1024 / 1024);
+  const heap = Math.round(mem.heapUsed / 1024 / 1024);
+  const heapTotal = Math.round(mem.heapTotal / 1024 / 1024);
+  console.log(`📊 Memory: RSS=${rss}MB, Heap=${heap}/${heapTotal}MB, Uptime=${Math.floor(process.uptime())}s`);
+  // Предупреждение если RAM больше 400MB
+  if (rss > 400) {
+    console.warn(`⚠️ HIGH MEMORY: ${rss}MB RSS — approaching limit`);
+  }
+}, 300000);
+
 // ==================== ROUTES ====================
 
 // Health check — Railway uses this to detect if app is alive
@@ -2597,7 +2610,7 @@ app.get('/api/users/:id/balance', async (req, res) => {
 app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id)
-      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -__v')
+      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -avatar -__v')
       .lean();
     if (!user) return res.status(404).json(null);
     res.json({ ...user, id: user._id.toString() });
@@ -2894,7 +2907,9 @@ app.get('/api/stats', async (req, res) => {
     let nearbyUsers = 0;
     if (lat && lng) {
       const fiveMinAgo = new Date(Date.now() - 5 * 60000);
-      const users = await User.find({ lastLocation: { $exists: true }, lastActivity: { $gte: fiveMinAgo } });
+      const users = await User.find(
+        { lastLocation: { $exists: true }, lastActivity: { $gte: fiveMinAgo } },
+      ).select('lastLocation').lean();
       const userLat = parseFloat(lat);
       const userLng = parseFloat(lng);
       nearbyUsers = users.filter(u => {
@@ -4566,7 +4581,6 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('🔴 Uncaught Exception:', err.message);
-  // Даём серверу секунду на завершение текущих запросов
-  setTimeout(() => process.exit(1), 1000);
+  console.error('🔴 Uncaught Exception:', err.message, err.stack);
+  // НЕ крашим сервер — логируем и продолжаем
 });

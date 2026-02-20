@@ -6,6 +6,54 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const sharp = require('sharp');
+const cloudinary = require('cloudinary').v2;
+
+// ==================== CLOUDINARY ====================
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+async function uploadToCloudinary(base64Image, userId) {
+  try {
+    if (!base64Image) return null;
+    
+    // Если уже Cloudinary URL — возвращаем как есть
+    if (base64Image.startsWith('https://res.cloudinary.com')) return base64Image;
+    
+    // Если это Google/Apple URL — загружаем напрямую
+    if (base64Image.startsWith('http')) {
+      const result = await cloudinary.uploader.upload(base64Image, {
+        folder: 'parkbro/avatars',
+        public_id: `user_${userId}`,
+        overwrite: true,
+        transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
+      });
+      return result.secure_url;
+    }
+    
+    // base64 формат
+    if (!base64Image.startsWith('data:image')) return null;
+    
+    const result = await cloudinary.uploader.upload(base64Image, {
+      folder: 'parkbro/avatars',
+      public_id: `user_${userId}`,
+      overwrite: true,
+      transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
+    });
+    return result.secure_url;
+  } catch (error) {
+    console.log('☁️ Cloudinary upload error:', error.message);
+    return null;
+  }
+}
+
+function getCloudinaryThumb(cloudinaryUrl, size = 80) {
+  if (!cloudinaryUrl || !cloudinaryUrl.includes('res.cloudinary.com')) return cloudinaryUrl;
+  // Вставляем трансформацию в URL: /upload/w_80,h_80,c_fill,q_auto/
+  return cloudinaryUrl.replace('/upload/', `/upload/w_${size},h_${size},c_fill,q_auto,f_auto/`);
+}
 
 // ==================== RATE LIMITER ====================
 const rateLimitStore = {};
@@ -2413,7 +2461,7 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
       user = new User({
         email: email.toLowerCase(),
         name,
-        avatar,
+        avatar: avatar || null,
         googleId,
         authProvider: 'google',
         balance: 50,
@@ -2423,6 +2471,16 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
         acceptedTermsAt: new Date()
       });
       await user.save();
+      
+      // Загружаем Google-аватарку в Cloudinary (асинхронно после save)
+      if (avatar) {
+        const cloudinaryUrl = await uploadToCloudinary(avatar, user._id.toString());
+        if (cloudinaryUrl) {
+          user.avatar = cloudinaryUrl;
+          user.avatarThumb = getCloudinaryThumb(cloudinaryUrl, 80);
+          await user.save();
+        }
+      }
       
       await new Transaction({
         userId: user._id,
@@ -2630,8 +2688,15 @@ app.put("/api/users/:id", async (req, res) => {
     // Разрешаем менять ТОЛЬКО безопасные поля
     if (car) user.car = car;
     if (avatar) {
-      user.avatar = avatar;
-      user.avatarThumb = await createThumbnail(avatar, 80);
+      const cloudinaryUrl = await uploadToCloudinary(avatar, req.params.id);
+      if (cloudinaryUrl) {
+        user.avatar = cloudinaryUrl;
+        user.avatarThumb = getCloudinaryThumb(cloudinaryUrl, 80);
+      } else {
+        // Fallback: сохраняем как раньше если Cloudinary недоступен
+        user.avatar = avatar;
+        user.avatarThumb = await createThumbnail(avatar, 80);
+      }
     }
     if (language) user.language = language;
     if (req.body.lastLocation) user.lastLocation = req.body.lastLocation;
@@ -3750,40 +3815,96 @@ app.get('/api/admin/transactions', async (req, res) => {
 // Endpoint для создания миниатюр у существующих пользователей
 app.post('/api/admin/migrate-avatars', async (req, res) => {
   try {
-    // Находим пользователей с avatar, но без avatarThumb
+    // Находим пользователей с base64 аватарами (НЕ Cloudinary URL)
     const users = await User.find({ 
       avatar: { $exists: true, $ne: null, $ne: '' },
-      $or: [
-        { avatarThumb: { $exists: false } },
-        { avatarThumb: null },
-        { avatarThumb: '' }
-      ]
     }).select('_id avatar');
     
-    console.log(`Found ${users.length} users to migrate`);
+    // Фильтруем только base64 (не Cloudinary URL)
+    const toMigrate = users.filter(u => u.avatar && !u.avatar.startsWith('https://res.cloudinary.com'));
+    
+    console.log(`☁️ Found ${toMigrate.length} users with base64 avatars to migrate to Cloudinary`);
     
     let migrated = 0;
     let failed = 0;
+    const results = [];
     
-    for (const user of users) {
+    for (const user of toMigrate) {
       try {
-        const thumb = await createThumbnail(user.avatar, 80);
-        if (thumb) {
-          await User.findByIdAndUpdate(user._id, { avatarThumb: thumb });
+        const cloudinaryUrl = await uploadToCloudinary(user.avatar, user._id.toString());
+        if (cloudinaryUrl) {
+          const thumbUrl = getCloudinaryThumb(cloudinaryUrl, 80);
+          await User.findByIdAndUpdate(user._id, { 
+            avatar: cloudinaryUrl, 
+            avatarThumb: thumbUrl 
+          });
           migrated++;
-          console.log(`Migrated avatar for user ${user._id}`);
+          results.push({ userId: user._id, status: 'ok', url: cloudinaryUrl });
+          console.log(`☁️ Migrated user ${user._id} → Cloudinary`);
         } else {
           failed++;
+          results.push({ userId: user._id, status: 'failed', error: 'upload returned null' });
         }
       } catch (err) {
         failed++;
-        console.log(`Failed to migrate user ${user._id}:`, err.message);
+        results.push({ userId: user._id, status: 'failed', error: err.message });
+        console.log(`☁️ Failed user ${user._id}:`, err.message);
       }
     }
     
-    res.json({ success: true, total: users.length, migrated, failed });
+    res.json({ success: true, total: toMigrate.length, migrated, failed, results });
   } catch (error) {
-    console.log('Migration error:', error);
+    console.log('☁️ Migration error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Очистка base64 данных после миграции в Cloudinary (освобождает место в MongoDB)
+app.post('/api/admin/cleanup-base64', async (req, res) => {
+  try {
+    // Находим юзеров у которых avatar — это Cloudinary URL (уже мигрированы)
+    // и при этом в БД может остаться старый base64 в другом формате
+    // На самом деле после миграции avatar уже = cloudinary URL, 
+    // но надо убрать avatarThumb если это base64
+    const users = await User.find({
+      avatar: { $regex: /^https:\/\/res\.cloudinary\.com/ },
+      avatarThumb: { $regex: /^data:image/ }
+    }).select('_id avatar');
+    
+    let cleaned = 0;
+    for (const user of users) {
+      const thumbUrl = getCloudinaryThumb(user.avatar, 80);
+      await User.findByIdAndUpdate(user._id, { avatarThumb: thumbUrl });
+      cleaned++;
+    }
+    
+    // Также чистим ownerAvatar и bookerAvatar в парковках
+    const parkings = await Parking.find({
+      $or: [
+        { ownerAvatar: { $regex: /^data:image/ } },
+        { bookerAvatar: { $regex: /^data:image/ } }
+      ]
+    }).select('_id ownerId bookedBy');
+    
+    let parkingsCleaned = 0;
+    for (const p of parkings) {
+      const updates = {};
+      if (p.ownerId) {
+        const owner = await User.findById(p.ownerId).select('avatarThumb').lean();
+        if (owner?.avatarThumb) updates.ownerAvatar = owner.avatarThumb;
+      }
+      if (p.bookedBy) {
+        const booker = await User.findById(p.bookedBy).select('avatarThumb').lean();
+        if (booker?.avatarThumb) updates.bookerAvatar = booker.avatarThumb;
+      }
+      if (Object.keys(updates).length > 0) {
+        await Parking.findByIdAndUpdate(p._id, updates);
+        parkingsCleaned++;
+      }
+    }
+    
+    res.json({ success: true, usersCleaned: cleaned, parkingsCleaned });
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });

@@ -1,4 +1,6 @@
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const sgMail = require("@sendgrid/mail");
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const cors = require('cors');
@@ -153,6 +155,101 @@ const getPushText = (type, field, lang, vars = {}) => {
 };
 
 const app = express();
+const httpServer = http.createServer(app);
+
+// ==================== SOCKET.IO ====================
+const io = new Server(httpServer, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  transports: ['websocket', 'polling']
+});
+
+// userId → Set<socketId> (один юзер может иметь несколько соединений)
+const userSockets = new Map();
+
+io.on('connection', (socket) => {
+  const userId = socket.handshake.auth?.userId || socket.handshake.query?.userId;
+  
+  if (userId) {
+    if (!userSockets.has(userId)) userSockets.set(userId, new Set());
+    userSockets.get(userId).add(socket.id);
+    console.log(`🔌 WS connected: user=${userId}, socket=${socket.id}, online=${userSockets.size}`);
+    
+    // Обновляем lastActivity
+    User.findByIdAndUpdate(userId, { lastActivity: new Date() }).catch(() => {});
+  }
+  
+  // Клиент может подписаться на комнату парковки (для чата)
+  socket.on('join:parking', (parkingId) => {
+    socket.join(`parking:${parkingId}`);
+  });
+  
+  socket.on('leave:parking', (parkingId) => {
+    socket.leave(`parking:${parkingId}`);
+  });
+  
+  // Клиент может подписаться на чат друга
+  socket.on('join:friendchat', (friendId) => {
+    socket.join(`friendchat:${userId}:${friendId}`);
+  });
+  
+  socket.on('leave:friendchat', (friendId) => {
+    socket.leave(`friendchat:${userId}:${friendId}`);
+  });
+  
+  // Обновление GPS позиции через WebSocket (вместо HTTP POST)
+  socket.on('location:update', async (data) => {
+    if (!userId || !data?.lat || !data?.lng) return;
+    try {
+      await User.findByIdAndUpdate(userId, { 
+        lastLocation: { lat: data.lat, lng: data.lng },
+        lastActivity: new Date()
+      });
+    } catch (e) {}
+  });
+  
+  // Обновление позиции букера (для отслеживания на карте владельцем)
+  socket.on('booker:location', async (data) => {
+    if (!userId || !data?.parkingId || !data?.lat || !data?.lng) return;
+    try {
+      const parking = await Parking.findById(data.parkingId);
+      if (parking && parking.bookedBy?.toString() === userId) {
+        parking.bookerLocation = { lat: data.lat, lng: data.lng };
+        await parking.save();
+        // Уведомляем владельца о новой позиции букера
+        emitToUser(parking.ownerId, 'booker:locationUpdate', { 
+          parkingId: data.parkingId, 
+          location: { lat: data.lat, lng: data.lng } 
+        });
+      }
+    } catch (e) {}
+  });
+  
+  socket.on('disconnect', () => {
+    if (userId && userSockets.has(userId)) {
+      userSockets.get(userId).delete(socket.id);
+      if (userSockets.get(userId).size === 0) userSockets.delete(userId);
+    }
+    console.log(`🔌 WS disconnected: user=${userId}, online=${userSockets.size}`);
+  });
+});
+
+// Хелпер: отправить событие конкретному юзеру
+function emitToUser(userId, event, data) {
+  const sockets = userSockets.get(userId?.toString());
+  if (sockets) {
+    for (const sid of sockets) {
+      io.to(sid).emit(event, data);
+    }
+  }
+}
+
+// Хелпер: отправить всем подключённым (для broadcast событий как parking:created)
+function emitToAll(event, data) {
+  io.emit(event, data);
+}
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
@@ -699,10 +796,16 @@ async function createIndexes() {
 
 setInterval(async () => {
   try {
-    await Parking.updateMany(
+    const expiredResult = await Parking.updateMany(
       { status: 'available', expiresAt: { $lte: new Date() } },
       { status: 'expired' }
     );
+    // 🔌 WebSocket: если парковки истекли — уведомляем всех
+    if (expiredResult.modifiedCount > 0) {
+      emitToAll('parking:expired', { count: expiredResult.modifiedCount });
+      // Также просим всех обновить список парковок
+      emitToAll('parkings:refresh', {});
+    }
   } catch (error) {
     console.log("Timer check error:", error);
   }
@@ -734,7 +837,9 @@ app.get('/health', (req, res) => {
       status: 'ok', 
       mongo: stateNames[mongoState],
       uptime: Math.floor(process.uptime()) + 's',
-      memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB'
+      memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB',
+      wsConnections: io.engine?.clientsCount || 0,
+      wsUsers: userSockets.size
     });
   } else {
     res.status(503).json({ 
@@ -1435,6 +1540,17 @@ app.post('/api/friends/message', async (req, res) => {
     
     const message = new FriendMessage({ fromUserId, toUserId, text });
     await message.save();
+    
+    // 🔌 WebSocket: новое сообщение другу
+    emitToUser(toUserId, 'friendMessage:new', { 
+      message: message.toObject(), 
+      fromUserId 
+    });
+    // Также в комнату чата если получатель в ней
+    io.to(`friendchat:${toUserId}:${fromUserId}`).emit('friendMessage:new', { 
+      message: message.toObject(), 
+      fromUserId 
+    });
     
     // Проверяем mute перед отправкой push
     const muted = await MutedUser.findOne({
@@ -2803,6 +2919,10 @@ app.post('/api/help-requests/create', async (req, res) => {
       expiresAt: new Date(Date.now() + 60 * 60000)
     });
     await helpRequest.save();
+    
+    // 🔌 WebSocket: новый запрос помощи
+    emitToAll('help:created', { helpRequest: helpRequest.toObject() });
+    
     res.json({ success: true, helpRequest });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -2821,6 +2941,11 @@ app.post('/api/help-requests/:id/accept', async (req, res) => {
     request.status = 'accepted';
     request.helperId = helperId;
     await request.save();
+    
+    // 🔌 WebSocket: запрос помощи принят
+    emitToUser(request.userId, 'help:accepted', { helpRequest: request.toObject() });
+    emitToAll('help:updated', { helpRequestId: request._id.toString() });
+    
     res.json({ success: true, request });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -2944,6 +3069,13 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     // Реферальный пассивный доход
     creditReferralPassive(request.helperId, 'помощь');
     
+    // 🔌 WebSocket: помощь завершена
+    emitToAll('help:completed', { helpRequestId: request._id.toString() });
+    const requesterAfter = await User.findById(request.userId).select('balance').lean();
+    const helperAfter = await User.findById(request.helperId).select('balance').lean();
+    emitToUser(request.userId, 'balance:update', { balance: requesterAfter?.balance });
+    emitToUser(request.helperId, 'balance:update', { balance: helperAfter?.balance });
+    
     res.json({ success: true });
   } catch (error) {
     console.log('HELP COMPLETE ERROR:', error);
@@ -2957,6 +3089,13 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
     if (!request) return res.status(404).json({ success: false });
     request.status = 'cancelled';
     await request.save();
+    
+    // 🔌 WebSocket: запрос помощи отменён
+    emitToAll('help:cancelled', { helpRequestId: request._id.toString() });
+    if (request.helperId) {
+      emitToUser(request.helperId, 'help:cancelled', { helpRequestId: request._id.toString() });
+    }
+    
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -3026,6 +3165,10 @@ app.post('/api/parkings/create', async (req, res) => {
       extensionsUsed: 0, messages: []
     });
     await newParking.save();
+    
+    // 🔌 WebSocket: уведомляем всех о новой парковке
+    emitToAll('parking:created', { parking: newParking });
+    
     res.json({ success: true, message: 'Парковка создана!', parking: newParking });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -3152,6 +3295,13 @@ app.post('/api/parkings/book', async (req, res) => {
       sendPushNotification(owner.pushToken, title, body, { type: 'booking', parkingId: parking._id.toString() });
     }
 
+    // 🔌 WebSocket: уведомляем всех что парковка забронирована
+    emitToAll('parking:booked', { parkingId: parking._id.toString() });
+    // Владельцу — детали бронирования (событие booking:new)
+    emitToUser(parking.ownerId, 'booking:new', { parking: parking.toObject(), bookingId: booking._id });
+    // Букеру — обновление баланса
+    emitToUser(userId, 'balance:update', { balance: deducted.balance });
+
     res.json({
       success: true, message: `Забронировано! -${parking.price} баллов`, newBalance: deducted.balance,
       parking: { ...parking.toObject(),
@@ -3257,6 +3407,14 @@ app.post('/api/parkings/:id/extend', async (req, res) => {
     parking.expiresAt = new Date(parking.expiresAt.getTime() + safeMinutes * 60000);
     parking.extensionsUsed += 1;
     await parking.save();
+    
+    // 🔌 WebSocket: парковка продлена
+    emitToAll('parking:extended', { 
+      parkingId: parking._id.toString(),
+      newExpiresAt: parking.expiresAt,
+      extensionsUsed: parking.extensionsUsed 
+    });
+    
     res.json({ success: true, parking });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -3298,6 +3456,10 @@ app.delete('/api/parkings/:id', async (req, res) => {
     if (parking.status === 'booked') return res.status(400).json({ success: false, message: 'Нельзя отменить забронированную парковку' });
     parking.status = 'cancelled';
     await parking.save();
+    
+    // 🔌 WebSocket: парковка отменена
+    emitToAll('parking:cancelled', { parkingId: parking._id.toString() });
+    
     res.json({ success: true });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -3359,6 +3521,16 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     parking.bookerAvatar = null;
     parking.messages = [];
     await parking.save();
+    
+    // 🔌 WebSocket: бронирование отменено
+    emitToAll('booking:cancelled', { parkingId: parking._id.toString() });
+    emitToAll('parking:cancelledBooking', { parkingId: parking._id.toString() });
+    // Обновляем баланс участникам (отправляем актуальный баланс)
+    const bookerFresh = await User.findById(bookerId).select('balance').lean();
+    const ownerFresh = await User.findById(ownerId).select('balance').lean();
+    emitToUser(bookerId, 'balance:update', { balance: bookerFresh?.balance });
+    emitToUser(ownerId, 'balance:update', { balance: ownerFresh?.balance });
+    
     res.json({ success: true });
   } catch (error) {
     console.log("CANCEL BOOKING ERROR:", error);
@@ -3460,6 +3632,10 @@ app.post('/api/parkings/:id/arrived', async (req, res) => {
       const body = getPushText('arrived', 'body', lang, { name: booker?.name || 'Driver' });
       sendPushNotification(owner.pushToken, title, body, { type: 'arrived', parkingId: parking._id.toString() });
     }
+    
+    // 🔌 WebSocket: букер приехал — уведомляем владельца
+    emitToUser(parking.ownerId, 'booking:arrived', { parkingId: parking._id.toString(), arrivedAt: parking.arrivedAt });
+    
     res.json({ success: true, parking });
   } catch (error) {
     console.log("ARRIVED ERROR:", error);
@@ -3534,6 +3710,16 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     // Реферальный пассивный доход (+1 балл рефереру за сделку)
     creditReferralPassive(parking.bookedBy, 'парковка');
     creditReferralPassive(parking.ownerId, 'парковка');
+    
+    // 🔌 WebSocket: сделка завершена
+    emitToAll('parking:completed', { parkingId: parking._id.toString() });
+    emitToUser(parking.ownerId, 'booking:completed', { parkingId: parking._id.toString(), bookingId: booking?._id });
+    emitToUser(parking.bookedBy, 'booking:completed', { parkingId: parking._id.toString(), bookingId: booking?._id });
+    // Отправляем актуальный баланс
+    const ownerBalanceAfter = await User.findById(parking.ownerId).select('balance').lean();
+    const bookerBalanceAfter = await User.findById(parking.bookedBy).select('balance').lean();
+    emitToUser(parking.ownerId, 'balance:update', { balance: ownerBalanceAfter?.balance });
+    emitToUser(parking.bookedBy, 'balance:update', { balance: bookerBalanceAfter?.balance });
     
     // Обновляем прогресс заданий
     const today = new Date().toISOString().split('T')[0];
@@ -3611,6 +3797,20 @@ app.post('/api/parkings/:id/messages', async (req, res) => {
       const body = getPushText('message', 'body', lang, { name: user?.name || 'User', text: shortText });
       sendPushNotification(recipient.pushToken, title, body, { type: 'message', parkingId: parking._id.toString() });
     }
+    
+    // 🔌 WebSocket: новое сообщение в чате бронирования
+    const recipientIdStr = (isOwner ? parking.bookedBy : parking.ownerId)?.toString();
+    const lastMsg = parking.messages[parking.messages.length - 1];
+    io.to(`parking:${parking._id.toString()}`).emit('message:booking', { 
+      parkingId: parking._id.toString(), 
+      message: lastMsg 
+    });
+    // На случай если получатель не в комнате — пушим напрямую
+    emitToUser(recipientIdStr, 'message:booking', { 
+      parkingId: parking._id.toString(), 
+      message: lastMsg 
+    });
+    
     res.json({ success: true, messages: parking.messages });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -3647,6 +3847,14 @@ app.post('/api/parkings/:id/wait-request', async (req, res) => {
       const body = getPushText('waitRequest', 'body', lang, { name: sender?.name || 'User', min: minutes.toString() });
       sendPushNotification(recipient.pushToken, title, body, { type: 'waitRequest', parkingId: parking._id.toString() });
     }
+    
+    // 🔌 WebSocket: запрос подождать
+    emitToUser(recipientId, 'booking:waitRequest', { 
+      parkingId: parking._id.toString(), 
+      minutes: safeMinutes, 
+      fromUserId 
+    });
+    
     res.json({ success: true });
   } catch (error) {
     console.log("WAIT REQUEST ERROR:", error);
@@ -3673,6 +3881,14 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     parking.waitResponse = { accepted, respondedAt: new Date() };
     parking.waitRequest = null;
     await parking.save();
+    
+    // 🔌 WebSocket: ответ на запрос подождать
+    const otherUserId = userId === parking.ownerId?.toString() ? parking.bookedBy?.toString() : parking.ownerId?.toString();
+    emitToUser(otherUserId, 'booking:waitResponse', { 
+      parkingId: parking._id.toString(), 
+      accepted,
+      newExpiresAt: parking.expiresAt
+    });
     
     res.json({ success: true, accepted });
   } catch (error) {
@@ -4668,14 +4884,20 @@ app.put('/api/settings/booking-radius', async (req, res) => {
 
 // ==================== START ====================
 
-const server = app.listen(PORT, () => {
+const server = httpServer.listen(PORT, () => {
   console.log(`🚗 ParkBro API running on port ${PORT}`);
-  console.log('✅ Сервер готов');
+  console.log('✅ Сервер готов (HTTP + WebSocket)');
+  console.log(`🔌 Socket.IO ready`);
 });
 
 // Graceful shutdown — корректное завершение при перезапуске Railway
 const gracefulShutdown = async (signal) => {
   console.log(`\n⚠️ ${signal} received — shutting down gracefully...`);
+  
+  // Закрываем Socket.IO
+  io.close(() => {
+    console.log('🔒 Socket.IO closed');
+  });
   
   // Перестаём принимать новые подключения
   server.close(() => {

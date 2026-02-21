@@ -4407,7 +4407,7 @@ app.post('/api/convoys/:id/location', async (req, res) => {
     
     // WS: отправить всем участникам обновление позиции
     convoy.members.forEach(m => {
-      if (m.userId?.toString() !== userId && m.status === 'active') {
+      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped' || m.status === 'arrived')) {
         emitToUser(m.userId.toString(), 'convoy:locationUpdate', { 
           convoyId: convoy._id.toString(), userId, location 
         });
@@ -4433,7 +4433,7 @@ app.post('/api/convoys/:id/status', async (req, res) => {
     
     // WS
     convoy.members.forEach(m => {
-      if (m.userId?.toString() !== userId && m.status === 'active') {
+      if (m.userId?.toString() !== userId && m.status !== 'left' && m.status !== 'invited') {
         emitToUser(m.userId.toString(), 'convoy:statusUpdate', { 
           convoyId: convoy._id.toString(), userId, status, name: member?.name 
         });

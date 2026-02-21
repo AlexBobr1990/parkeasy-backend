@@ -4431,14 +4431,29 @@ app.post('/api/convoys/:id/status', async (req, res) => {
     if (member) member.status = status;
     await convoy.save();
     
-    // WS
-    convoy.members.forEach(m => {
+    // WS + Push
+    for (const m of convoy.members) {
       if (m.userId?.toString() !== userId && m.status !== 'left' && m.status !== 'invited') {
         emitToUser(m.userId.toString(), 'convoy:statusUpdate', { 
           convoyId: convoy._id.toString(), userId, status, name: member?.name 
         });
+        // Push
+        const recipient = await User.findById(m.userId).select('pushToken language').lean();
+        if (recipient?.pushToken) {
+          const lang = recipient.language || 'en';
+          const memberName = member?.name || 'User';
+          if (status === 'stopped') {
+            const titles = { en: '🔴 Convoy stop', ru: '🔴 Остановка', es: '🔴 Parada', uk: '🔴 Зупинка' };
+            const bodies = { en: `${memberName} has stopped`, ru: `${memberName} остановился`, es: `${memberName} se detuvo`, uk: `${memberName} зупинився` };
+            sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'convoy_status', convoyId: convoy._id.toString() });
+          } else if (status === 'active') {
+            const titles = { en: '🟢 Back on the road', ru: '🟢 Снова в пути', es: '🟢 De vuelta', uk: '🟢 Знову в дорозі' };
+            const bodies = { en: `${memberName} is moving again`, ru: `${memberName} снова в пути`, es: `${memberName} está en movimiento`, uk: `${memberName} знову рухається` };
+            sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'convoy_status', convoyId: convoy._id.toString() });
+          }
+        }
       }
-    });
+    }
     
     res.json({ success: true });
   } catch (error) {

@@ -686,6 +686,7 @@ const convoySchema = new mongoose.Schema({
     status: { type: String, default: 'invited', enum: ['invited', 'active', 'stopped', 'arrived', 'left'] },
     location: { lat: Number, lng: Number },
     lastLocationUpdate: Date,
+    lastChatReadAt: { type: Date, default: Date.now },
     joinedAt: Date
   }],
   messages: [{
@@ -1726,9 +1727,22 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
       'members': { $elemMatch: { userId: userId, status: 'invited' } }
     });
     
-    res.json({ count, friendRequests, convoyInvites });
+    // Непрочитанные сообщения караванов
+    let convoyMessages = 0;
+    const activeConvoys = await Convoy.find({
+      status: 'active',
+      'members': { $elemMatch: { userId: userId, status: { $in: ['active', 'stopped', 'arrived'] } } }
+    }).select('members messages').lean();
+    for (const c of activeConvoys) {
+      const me = c.members.find(m => m.userId?.toString() === userId);
+      const readAt = me?.lastChatReadAt || me?.joinedAt || new Date(0);
+      const unread = (c.messages || []).filter(m => new Date(m.createdAt) > new Date(readAt) && m.userId !== userId).length;
+      convoyMessages += unread;
+    }
+    
+    res.json({ count, friendRequests, convoyInvites, convoyMessages });
   } catch (error) {
-    res.json({ count: 0, friendRequests: 0, convoyInvites: 0 });
+    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0 });
   }
 });
 
@@ -4324,7 +4338,16 @@ app.get('/api/users/:id/convoys', async (req, res) => {
       'members.userId': userId, 
       status: 'active' 
     }).sort({ createdAt: -1 }).lean();
-    res.json(convoys);
+    
+    // Добавляем unreadCount для каждого каравана
+    const result = convoys.map(c => {
+      const me = c.members.find(m => m.userId?.toString() === userId);
+      const readAt = me?.lastChatReadAt || me?.joinedAt || new Date(0);
+      const unreadCount = (c.messages || []).filter(m => new Date(m.createdAt) > new Date(readAt) && m.userId !== userId).length;
+      return { ...c, unreadCount };
+    });
+    
+    res.json(result);
   } catch (error) {
     res.json([]);
   }
@@ -4506,10 +4529,23 @@ app.post('/api/convoys/:id/messages', async (req, res) => {
     convoy.messages.push(msg);
     await convoy.save();
     
-    // WS broadcast в комнату каравана
+    // WS broadcast в комнату каравана (для тех кто на ConvoyScreen)
     const convoyRoom = `convoy:${convoy._id.toString()}`;
     io.to(convoyRoom).emit('convoy:message', { convoyId: convoy._id.toString(), message: msg });
-    console.log(`🚗 convoy:message emitted to room=${convoyRoom}, from=${userId}, text="${text.substring(0, 30)}"`);
+    
+    // Также emitToUser для бейджей на MapScreen/FriendsScreen (юзеры не в комнате каравана)
+    for (const m of convoy.members) {
+      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
+        emitToUser(m.userId.toString(), 'convoy:message', { convoyId: convoy._id.toString(), message: msg });
+      }
+    }
+    
+    // WS: convoy:activity для обновления бейджей на MapScreen/ProfileScreen (вне комнаты)
+    for (const m of convoy.members) {
+      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
+        emitToUser(m.userId.toString(), 'convoy:activity', { convoyId: convoy._id.toString() });
+      }
+    }
     
     // Push уведомления
     for (const m of convoy.members) {
@@ -4524,6 +4560,20 @@ app.post('/api/convoys/:id/messages', async (req, res) => {
     }
     
     res.json({ success: true, message: msg });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Отметить чат каравана как прочитанный
+app.post('/api/convoys/:id/read-chat', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    await Convoy.updateOne(
+      { _id: req.params.id, 'members.userId': userId },
+      { $set: { 'members.$.lastChatReadAt': new Date() } }
+    );
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
   }

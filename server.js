@@ -4036,31 +4036,41 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
     
-    // Проверка: только участники
-    if (userId && userId !== parking.ownerId?.toString() && userId !== parking.bookedBy?.toString()) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
+    // Запоминаем кто запросил ожидание до обнуления
+    const waitRequestFromUserId = parking.waitRequest?.fromUserId?.toString();
     
     if (accepted && parking.waitRequest) {
       parking.expiresAt = new Date(parking.expiresAt.getTime() + parking.waitRequest.minutes * 60000);
     }
     
-    // Save response for owner to see
+    // Save response for both to see
     parking.waitResponse = { accepted, respondedAt: new Date() };
     parking.waitRequest = null;
     await parking.save();
     
-    // 🔌 WebSocket: ответ на запрос подождать
-    const otherUserId = userId === parking.ownerId?.toString() ? parking.bookedBy?.toString() : parking.ownerId?.toString();
-    emitToUser(otherUserId, 'booking:waitResponse', { 
+    // 🔌 WebSocket: ответ на запрос подождать — отправляем ОБОИМ
+    const wsData = { 
       parkingId: parking._id.toString(), 
       accepted,
       newExpiresAt: parking.expiresAt
-    });
+    };
+    if (parking.ownerId) emitToUser(parking.ownerId.toString(), 'booking:waitResponse', wsData);
+    if (parking.bookedBy) emitToUser(parking.bookedBy.toString(), 'booking:waitResponse', wsData);
+    
+    // 📱 Push: уведомляем того кто запросил ожидание
+    if (waitRequestFromUserId) {
+      const recipient = await User.findById(waitRequestFromUserId).select('pushToken language').lean();
+      if (recipient?.pushToken) {
+        const lang = recipient.language || 'en';
+        const titles = { en: accepted ? '✅ Wait accepted!' : '❌ Cannot wait', ru: accepted ? '✅ Готовы подождать!' : '❌ Не могут ждать', es: accepted ? '✅ ¡Esperarán!' : '❌ No pueden esperar', uk: accepted ? '✅ Готові почекати!' : '❌ Не можуть чекати' };
+        const bodies = { en: accepted ? 'The other driver agreed to wait for you' : 'The other driver cannot wait longer', ru: accepted ? 'Другой водитель согласился подождать' : 'Другой водитель не может ждать дольше', es: accepted ? 'El otro conductor aceptó esperar' : 'El otro conductor no puede esperar más', uk: accepted ? 'Інший водій погодився почекати' : 'Інший водій не може чекати довше' };
+        sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'waitResponse', parkingId: parking._id.toString() });
+      }
+    }
     
     res.json({ success: true, accepted });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("WAIT RESPONSE ERROR:", error);
     res.status(500).json({ success: false });
   }
 });

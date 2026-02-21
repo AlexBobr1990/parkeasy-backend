@@ -1003,6 +1003,7 @@ app.post('/api/auth/verify-email', rateLimit('verify-email', 10, 900000), async 
         if (todayReferrals < 10) {
           referrer.balance += 20;
           referrer.referralCount += 1;
+          referrer.referralEarnings = (referrer.referralEarnings || 0) + 20;
           await referrer.save();
           await new Transaction({
             userId: referrer._id, type: 'referral', amount: 20,
@@ -2565,7 +2566,7 @@ app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => 
 
 app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, res) => {
   try {
-    const { googleId, email, name, avatar } = req.body;
+    const { googleId, email, name, avatar, referralCode } = req.body;
     
     if (!googleId || !email) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
@@ -2593,7 +2594,7 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
       }
     } else {
       // Создаём нового пользователя
-      user = new User({
+      const newUserData = {
         email: email.toLowerCase(),
         name,
         avatar: avatar || null,
@@ -2604,8 +2605,38 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
         emailVerified: true, // Google уже верифицировал
         acceptedTerms: true,
         acceptedTermsAt: new Date()
-      });
+      };
+      
+      // Реферальный код
+      if (referralCode) {
+        const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
+        if (referrer) {
+          newUserData.referredBy = referrer._id;
+          newUserData.balance = 50 + 70; // Бонус рефералу
+        }
+      }
+      
+      user = new User(newUserData);
       await user.save();
+      
+      // Начисляем реферальный бонус пригласившему (сразу, т.к. Google уже верифицирован)
+      if (user.referredBy) {
+        const referrer = await User.findById(user.referredBy);
+        if (referrer) {
+          const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+          const todayReferrals = await Transaction.countDocuments({ userId: referrer._id, type: 'referral', createdAt: { $gte: todayStart } });
+          if (todayReferrals < 10) {
+            referrer.balance += 20;
+            referrer.referralCount += 1;
+            referrer.referralEarnings += 20;
+            await referrer.save();
+            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Реферальный бонус за ${user.name}` }).save();
+            console.log(`✅ Referral bonus +20 to ${referrer.name} for Google user ${user.name}`);
+          }
+        }
+        // Транзакция бонуса новому юзеру
+        await new Transaction({ userId: user._id, type: 'referral', amount: 70, description: 'Реферальный бонус за регистрацию' }).save();
+      }
       
       // Загружаем Google-аватарку в Cloudinary (асинхронно после save)
       if (avatar) {
@@ -2650,7 +2681,7 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
 
 app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res) => {
   try {
-    const { appleId, email, name } = req.body;
+    const { appleId, email, name, referralCode } = req.body;
     
     if (!appleId) {
       return res.status(400).json({ success: false, message: 'Missing appleId' });
@@ -2675,7 +2706,7 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
         await user.save();
       }
     } else {
-      user = new User({
+      const newUserData = {
         email: email?.toLowerCase() || `apple_${appleId}@private.relay`,
         name: name || 'Пользователь',
         appleId,
@@ -2685,8 +2716,37 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
         emailVerified: true,
         acceptedTerms: true,
         acceptedTermsAt: new Date()
-      });
+      };
+      
+      // Реферальный код
+      if (referralCode) {
+        const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
+        if (referrer) {
+          newUserData.referredBy = referrer._id;
+          newUserData.balance = 50 + 70;
+        }
+      }
+      
+      user = new User(newUserData);
       await user.save();
+      
+      // Начисляем реферальный бонус пригласившему
+      if (user.referredBy) {
+        const referrer = await User.findById(user.referredBy);
+        if (referrer) {
+          const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+          const todayReferrals = await Transaction.countDocuments({ userId: referrer._id, type: 'referral', createdAt: { $gte: todayStart } });
+          if (todayReferrals < 10) {
+            referrer.balance += 20;
+            referrer.referralCount += 1;
+            referrer.referralEarnings += 20;
+            await referrer.save();
+            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Реферальный бонус за ${user.name}` }).save();
+            console.log(`✅ Referral bonus +20 to ${referrer.name} for Apple user ${user.name}`);
+          }
+        }
+        await new Transaction({ userId: user._id, type: 'referral', amount: 70, description: 'Реферальный бонус за регистрацию' }).save();
+      }
       
       await new Transaction({
         userId: user._id,

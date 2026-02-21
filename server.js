@@ -653,6 +653,36 @@ const helpRequestSchema = new mongoose.Schema({
 });
 const HelpRequest = mongoose.model('HelpRequest', helpRequestSchema);
 
+// Конвой / Караван
+const convoySchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  creatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  destination: {
+    lat: Number,
+    lng: Number,
+    address: String
+  },
+  members: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    name: String,
+    avatar: String,
+    status: { type: String, default: 'invited', enum: ['invited', 'active', 'stopped', 'arrived', 'left'] },
+    location: { lat: Number, lng: Number },
+    lastLocationUpdate: Date,
+    joinedAt: Date
+  }],
+  messages: [{
+    userId: String,
+    senderName: String,
+    text: String,
+    time: String,
+    createdAt: { type: Date, default: Date.now }
+  }],
+  status: { type: String, default: 'active', enum: ['active', 'completed'] },
+  createdAt: { type: Date, default: Date.now }
+});
+const Convoy = mongoose.model('Convoy', convoySchema);
+
 // ==================== APP SETTINGS ====================
 const appSettingsSchema = new mongoose.Schema({
   bookingRadiusKm: { type: Number, default: 5 },
@@ -4205,6 +4235,260 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     res.json({ success: true, accepted });
   } catch (error) {
     console.log("WAIT RESPONSE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// ==================== CONVOY / КАРАВАН ====================
+
+// Создать конвой
+app.post('/api/convoys', async (req, res) => {
+  try {
+    const { creatorId, name, destination, friendIds } = req.body;
+    if (!creatorId || !name) return res.status(400).json({ success: false, message: 'Name required' });
+    
+    const creator = await User.findById(creatorId).select('name avatarThumb').lean();
+    if (!creator) return res.status(404).json({ success: false });
+    
+    const members = [{
+      userId: creatorId,
+      name: creator.name,
+      avatar: creator.avatarThumb,
+      status: 'active',
+      joinedAt: new Date()
+    }];
+    
+    // Добавить приглашённых друзей
+    if (friendIds && friendIds.length > 0) {
+      const friends = await User.find({ _id: { $in: friendIds } }).select('name avatarThumb pushToken language').lean();
+      for (const friend of friends) {
+        members.push({
+          userId: friend._id,
+          name: friend.name,
+          avatar: friend.avatarThumb,
+          status: 'invited'
+        });
+        // Push уведомление
+        if (friend.pushToken) {
+          const lang = friend.language || 'en';
+          const titles = { en: '🚗 Convoy invite!', ru: '🚗 Приглашение в караван!', es: '🚗 ¡Invitación al convoy!', uk: '🚗 Запрошення в караван!' };
+          const bodies = { en: `${creator.name} invites you to "${name}"`, ru: `${creator.name} приглашает вас в "${name}"`, es: `${creator.name} te invita a "${name}"`, uk: `${creator.name} запрошує вас до "${name}"` };
+          sendPushNotification(friend.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'convoy_invite' });
+        }
+        // WS
+        emitToUser(friend._id.toString(), 'convoy:invited', { convoyName: name, creatorName: creator.name });
+      }
+    }
+    
+    const convoy = new Convoy({ name, creatorId, destination, members });
+    await convoy.save();
+    
+    res.json({ success: true, convoy });
+  } catch (error) {
+    console.log('CONVOY CREATE ERROR:', error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Мои конвои (активные)
+app.get('/api/users/:id/convoys', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const convoys = await Convoy.find({ 
+      'members.userId': userId, 
+      status: 'active' 
+    }).sort({ createdAt: -1 }).lean();
+    res.json(convoys);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Получить конвой
+app.get('/api/convoys/:id', async (req, res) => {
+  try {
+    const convoy = await Convoy.findById(req.params.id).lean();
+    if (!convoy) return res.status(404).json({ success: false });
+    res.json(convoy);
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Принять приглашение
+app.post('/api/convoys/:id/join', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy || convoy.status !== 'active') return res.status(404).json({ success: false });
+    
+    const member = convoy.members.find(m => m.userId?.toString() === userId);
+    if (member) {
+      member.status = 'active';
+      member.joinedAt = new Date();
+    } else {
+      const user = await User.findById(userId).select('name avatarThumb').lean();
+      convoy.members.push({ userId, name: user?.name, avatar: user?.avatarThumb, status: 'active', joinedAt: new Date() });
+    }
+    await convoy.save();
+    
+    // WS: уведомить всех участников
+    convoy.members.forEach(m => {
+      if (m.userId?.toString() !== userId) {
+        emitToUser(m.userId.toString(), 'convoy:memberJoined', { convoyId: convoy._id.toString(), userId });
+      }
+    });
+    
+    res.json({ success: true, convoy });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Покинуть конвой
+app.post('/api/convoys/:id/leave', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy) return res.status(404).json({ success: false });
+    
+    const member = convoy.members.find(m => m.userId?.toString() === userId);
+    if (member) member.status = 'left';
+    await convoy.save();
+    
+    // WS
+    convoy.members.forEach(m => {
+      if (m.userId?.toString() !== userId && m.status === 'active') {
+        emitToUser(m.userId.toString(), 'convoy:memberLeft', { convoyId: convoy._id.toString(), userId, name: member?.name });
+      }
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Завершить конвой (только создатель)
+app.post('/api/convoys/:id/end', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy) return res.status(404).json({ success: false });
+    if (convoy.creatorId.toString() !== userId) return res.status(403).json({ success: false, message: 'Only creator can end' });
+    
+    convoy.status = 'completed';
+    await convoy.save();
+    
+    // WS
+    convoy.members.forEach(m => {
+      emitToUser(m.userId.toString(), 'convoy:ended', { convoyId: convoy._id.toString(), name: convoy.name });
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Обновить локацию участника
+app.post('/api/convoys/:id/location', async (req, res) => {
+  try {
+    const { userId, location } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy || convoy.status !== 'active') return res.status(404).json({ success: false });
+    
+    const member = convoy.members.find(m => m.userId?.toString() === userId);
+    if (member) {
+      member.location = location;
+      member.lastLocationUpdate = new Date();
+    }
+    await convoy.save();
+    
+    // WS: отправить всем участникам обновление позиции
+    convoy.members.forEach(m => {
+      if (m.userId?.toString() !== userId && m.status === 'active') {
+        emitToUser(m.userId.toString(), 'convoy:locationUpdate', { 
+          convoyId: convoy._id.toString(), userId, location 
+        });
+      }
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Обновить статус участника (stopped, arrived)
+app.post('/api/convoys/:id/status', async (req, res) => {
+  try {
+    const { userId, status } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy) return res.status(404).json({ success: false });
+    
+    const member = convoy.members.find(m => m.userId?.toString() === userId);
+    if (member) member.status = status;
+    await convoy.save();
+    
+    // WS
+    convoy.members.forEach(m => {
+      if (m.userId?.toString() !== userId && m.status === 'active') {
+        emitToUser(m.userId.toString(), 'convoy:statusUpdate', { 
+          convoyId: convoy._id.toString(), userId, status, name: member?.name 
+        });
+      }
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Сообщения конвоя
+app.get('/api/convoys/:id/messages', async (req, res) => {
+  try {
+    const convoy = await Convoy.findById(req.params.id).select('messages').lean();
+    res.json(convoy?.messages || []);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+app.post('/api/convoys/:id/messages', async (req, res) => {
+  try {
+    const { userId, text } = req.body;
+    const convoy = await Convoy.findById(req.params.id);
+    if (!convoy || convoy.status !== 'active') return res.status(404).json({ success: false });
+    
+    const member = convoy.members.find(m => m.userId?.toString() === userId);
+    if (!member) return res.status(403).json({ success: false });
+    
+    const msg = {
+      userId, senderName: member.name || 'User', text,
+      time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+      createdAt: new Date()
+    };
+    convoy.messages.push(msg);
+    await convoy.save();
+    
+    // WS + Push
+    for (const m of convoy.members) {
+      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
+        emitToUser(m.userId.toString(), 'convoy:message', { convoyId: convoy._id.toString(), message: msg });
+        // Push
+        const recipient = await User.findById(m.userId).select('pushToken language').lean();
+        if (recipient?.pushToken) {
+          const lang = recipient.language || 'en';
+          const shortText = text.length > 50 ? text.substring(0, 50) + '...' : text;
+          sendPushNotification(recipient.pushToken, `🚗 ${convoy.name}`, `${member.name}: ${shortText}`, { type: 'convoy_message', convoyId: convoy._id.toString() });
+        }
+      }
+    }
+    
+    res.json({ success: true, message: msg });
+  } catch (error) {
     res.status(500).json({ success: false });
   }
 });

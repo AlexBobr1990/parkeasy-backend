@@ -213,6 +213,23 @@ io.on('connection', (socket) => {
   socket.on('leave:friendchat', (friendId) => {
     socket.leave(`friendchat:${userId}:${friendId}`);
   });
+
+  // Клиент подписывается на комнату каравана
+  socket.on('join:convoy', (convoyId) => {
+    if (convoyId) {
+      const room = `convoy:${convoyId.toString()}`;
+      socket.join(room);
+      console.log(`🚗 WS join convoy room: user=${userId}, room=${room}`);
+    }
+  });
+
+  socket.on('leave:convoy', (convoyId) => {
+    if (convoyId) {
+      const room = `convoy:${convoyId.toString()}`;
+      socket.leave(room);
+      console.log(`🚗 WS leave convoy room: user=${userId}, room=${room}`);
+    }
+  });
   
   // Обновление GPS позиции через WebSocket (вместо HTTP POST)
   socket.on('location:update', async (data) => {
@@ -4341,12 +4358,9 @@ app.post('/api/convoys/:id/join', async (req, res) => {
     }
     await convoy.save();
     
-    // WS: уведомить всех участников
-    convoy.members.forEach(m => {
-      if (m.userId?.toString() !== userId) {
-        emitToUser(m.userId.toString(), 'convoy:memberJoined', { convoyId: convoy._id.toString(), userId });
-      }
-    });
+    // WS: уведомить всех в комнате
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:memberJoined', { convoyId: convoy._id.toString(), userId });
     
     res.json({ success: true, convoy });
   } catch (error) {
@@ -4366,11 +4380,8 @@ app.post('/api/convoys/:id/leave', async (req, res) => {
     await convoy.save();
     
     // WS
-    convoy.members.forEach(m => {
-      if (m.userId?.toString() !== userId && m.status === 'active') {
-        emitToUser(m.userId.toString(), 'convoy:memberLeft', { convoyId: convoy._id.toString(), userId, name: member?.name });
-      }
-    });
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:memberLeft', { convoyId: convoy._id.toString(), userId, name: member?.name });
     
     res.json({ success: true });
   } catch (error) {
@@ -4390,9 +4401,8 @@ app.post('/api/convoys/:id/end', async (req, res) => {
     await convoy.save();
     
     // WS
-    convoy.members.forEach(m => {
-      emitToUser(m.userId.toString(), 'convoy:ended', { convoyId: convoy._id.toString(), name: convoy.name });
-    });
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:ended', { convoyId: convoy._id.toString(), name: convoy.name });
     
     res.json({ success: true });
   } catch (error) {
@@ -4414,13 +4424,10 @@ app.post('/api/convoys/:id/location', async (req, res) => {
     }
     await convoy.save();
     
-    // WS: отправить всем участникам обновление позиции
-    convoy.members.forEach(m => {
-      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped' || m.status === 'arrived')) {
-        emitToUser(m.userId.toString(), 'convoy:locationUpdate', { 
-          convoyId: convoy._id.toString(), userId, location 
-        });
-      }
+    // WS: отправить всем в комнате обновление позиции
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:locationUpdate', { 
+      convoyId: convoy._id.toString(), userId, location 
     });
     
     res.json({ success: true });
@@ -4440,13 +4447,15 @@ app.post('/api/convoys/:id/status', async (req, res) => {
     if (member) member.status = status;
     await convoy.save();
     
-    // WS + Push
+    // WS broadcast в комнату
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:statusUpdate', { 
+      convoyId: convoy._id.toString(), userId, status, name: member?.name 
+    });
+    
+    // Push уведомления
     for (const m of convoy.members) {
       if (m.userId?.toString() !== userId && m.status !== 'left' && m.status !== 'invited') {
-        emitToUser(m.userId.toString(), 'convoy:statusUpdate', { 
-          convoyId: convoy._id.toString(), userId, status, name: member?.name 
-        });
-        // Push
         const recipient = await User.findById(m.userId).select('pushToken language').lean();
         if (recipient?.pushToken) {
           const lang = recipient.language || 'en';
@@ -4497,11 +4506,14 @@ app.post('/api/convoys/:id/messages', async (req, res) => {
     convoy.messages.push(msg);
     await convoy.save();
     
-    // WS + Push
+    // WS broadcast в комнату каравана
+    const convoyRoom = `convoy:${convoy._id.toString()}`;
+    io.to(convoyRoom).emit('convoy:message', { convoyId: convoy._id.toString(), message: msg });
+    console.log(`🚗 convoy:message emitted to room=${convoyRoom}, from=${userId}, text="${text.substring(0, 30)}"`);
+    
+    // Push уведомления
     for (const m of convoy.members) {
       if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
-        emitToUser(m.userId.toString(), 'convoy:message', { convoyId: convoy._id.toString(), message: msg });
-        // Push
         const recipient = await User.findById(m.userId).select('pushToken language').lean();
         if (recipient?.pushToken) {
           const lang = recipient.language || 'en';

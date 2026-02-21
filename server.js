@@ -4264,30 +4264,33 @@ app.post('/api/convoys', async (req, res) => {
       joinedAt: new Date()
     }];
     
-    // Добавить приглашённых друзей
+    // Добавить приглашённых друзей в массив members
+    let invitedFriends = [];
     if (friendIds && friendIds.length > 0) {
-      const friends = await User.find({ _id: { $in: friendIds } }).select('name avatarThumb pushToken language').lean();
-      for (const friend of friends) {
+      invitedFriends = await User.find({ _id: { $in: friendIds } }).select('name avatarThumb pushToken language').lean();
+      for (const friend of invitedFriends) {
         members.push({
           userId: friend._id,
           name: friend.name,
           avatar: friend.avatarThumb,
           status: 'invited'
         });
-        // Push уведомление
-        if (friend.pushToken) {
-          const lang = friend.language || 'en';
-          const titles = { en: '🚗 Convoy invite!', ru: '🚗 Приглашение в караван!', es: '🚗 ¡Invitación al convoy!', uk: '🚗 Запрошення в караван!' };
-          const bodies = { en: `${creator.name} invites you to "${name}"`, ru: `${creator.name} приглашает вас в "${name}"`, es: `${creator.name} te invita a "${name}"`, uk: `${creator.name} запрошує вас до "${name}"` };
-          sendPushNotification(friend.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'convoy_invite' });
-        }
-        // WS
-        emitToUser(friend._id.toString(), 'convoy:invited', { convoyName: name, creatorName: creator.name });
       }
     }
     
     const convoy = new Convoy({ name, creatorId, destination, members });
     await convoy.save();
+    
+    // Push + WS invites (после save, чтобы convoyId был доступен)
+    for (const friend of invitedFriends) {
+      if (friend.pushToken) {
+        const lang = friend.language || 'en';
+        const titles = { en: '🚗 Convoy invite!', ru: '🚗 Приглашение в караван!', es: '🚗 ¡Invitación al convoy!', uk: '🚗 Запрошення в караван!' };
+        const bodies = { en: `${creator.name} invites you to "${name}"`, ru: `${creator.name} приглашает вас в "${name}"`, es: `${creator.name} te invita a "${name}"`, uk: `${creator.name} запрошує вас до "${name}"` };
+        sendPushNotification(friend.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'convoy_invite', convoyId: convoy._id.toString() });
+      }
+      emitToUser(friend._id.toString(), 'convoy:invited', { convoyId: convoy._id.toString(), convoyName: name, creatorName: creator.name });
+    }
     
     res.json({ success: true, convoy });
   } catch (error) {

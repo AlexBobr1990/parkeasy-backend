@@ -481,9 +481,10 @@ const transactionSchema = new mongoose.Schema({
 const ratingSchema = new mongoose.Schema({
   fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
+  bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
+  helpRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'HelpRequest' },
   rating: { type: Number, required: true, min: 1, max: 5 },
-  problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'other'] }],
+  problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'didnt_help', 'slow_response', 'other'] }],
   comment: String,
   fromRole: String,
   lastActivity: { type: Date, default: Date.now },
@@ -2849,6 +2850,63 @@ app.post('/api/ratings', async (req, res) => {
   }
 });
 
+// Рейтинг для помощи на дороге
+app.post('/api/ratings/help', async (req, res) => {
+  try {
+    const { fromUserId, toUserId, helpRequestId, rating, problems, comment } = req.body;
+    
+    const request = await HelpRequest.findById(helpRequestId);
+    if (!request || request.status !== 'completed') {
+      return res.status(400).json({ success: false, message: 'Help request not found or not completed' });
+    }
+    
+    // Проверяем что пользователь участвовал
+    const isRequester = request.userId.toString() === fromUserId;
+    const isHelper = request.helperId.toString() === fromUserId;
+    
+    if (!isRequester && !isHelper) {
+      return res.status(403).json({ success: false, message: 'You were not part of this help request' });
+    }
+    
+    // Проверяем что toUserId = другой участник
+    const expectedTo = isRequester ? request.helperId.toString() : request.userId.toString();
+    if (toUserId !== expectedTo) {
+      return res.status(400).json({ success: false, message: 'Invalid rating target' });
+    }
+    
+    // Проверяем что ещё не ставили оценку
+    const existingRating = await Rating.findOne({ fromUserId, helpRequestId });
+    if (existingRating) {
+      return res.status(400).json({ success: false, message: 'Already rated' });
+    }
+    
+    const newRating = new Rating({
+      fromRole: isRequester ? 'requester' : 'helper',
+      fromUserId,
+      toUserId,
+      helpRequestId,
+      rating,
+      problems: problems || [],
+      comment
+    });
+    await newRating.save();
+    
+    // Обновляем рейтинг пользователя
+    const targetUser = await User.findById(toUserId);
+    if (targetUser) {
+      targetUser.totalRatingSum += rating;
+      targetUser.ratingCount += 1;
+      targetUser.rating = targetUser.totalRatingSum / targetUser.ratingCount;
+      await targetUser.save();
+    }
+    
+    res.json({ success: true, message: 'Rating saved' });
+  } catch (error) {
+    console.error('Help rating error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // Лёгкий endpoint для проверки баланса (без avatar!)
 app.get('/api/users/:id/balance', async (req, res) => {
   try {
@@ -3221,24 +3279,35 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     // Реферальный пассивный доход
     creditReferralPassive(request.helperId, 'помощь');
     
-    // 🔌 WebSocket: помощь завершена
-    emitToAll('help:completed', { helpRequestId: request._id.toString() });
-    const requesterAfter = await User.findById(request.userId).select('balance pushToken language').lean();
-    const helperAfter = await User.findById(request.helperId).select('balance pushToken language').lean();
-    emitToUser(request.userId, 'balance:update', { balance: requesterAfter?.balance });
-    emitToUser(request.helperId, 'balance:update', { balance: helperAfter?.balance });
+    // 🔌 WebSocket: помощь завершена — включаем данные для рейтинга
+    const requesterUser = await User.findById(request.userId).select('name balance pushToken language').lean();
+    const helperUser = await User.findById(request.helperId).select('name balance pushToken language').lean();
+    
+    const completedData = { 
+      helpRequestId: request._id.toString(),
+      requesterId: request.userId.toString(),
+      helperId: request.helperId.toString(),
+      requesterName: requesterUser?.name || 'User',
+      helperName: helperUser?.name || 'Helper'
+    };
+    emitToUser(request.userId, 'help:completed', completedData);
+    emitToUser(request.helperId, 'help:completed', completedData);
+    emitToAll('help:updated', { helpRequestId: request._id.toString() });
+    
+    emitToUser(request.userId, 'balance:update', { balance: requesterUser?.balance });
+    emitToUser(request.helperId, 'balance:update', { balance: helperUser?.balance });
     
     // 📱 Push: уведомляем обе стороны о завершении
-    if (requesterAfter?.pushToken) {
-      const lang = requesterAfter.language || 'en';
-      sendPushNotification(requesterAfter.pushToken, 
+    if (requesterUser?.pushToken) {
+      const lang = requesterUser.language || 'en';
+      sendPushNotification(requesterUser.pushToken, 
         getPushText('helpCompleted', 'title', lang), 
         getPushText('helpCompleted', 'body', lang),
         { type: 'help_completed', helpRequestId: request._id.toString() });
     }
-    if (helperAfter?.pushToken) {
-      const lang = helperAfter.language || 'en';
-      sendPushNotification(helperAfter.pushToken,
+    if (helperUser?.pushToken) {
+      const lang = helperUser.language || 'en';
+      sendPushNotification(helperUser.pushToken,
         getPushText('helpCompleted', 'title', lang),
         getPushText('helpCompleted', 'body', lang),
         { type: 'help_completed', helpRequestId: request._id.toString() });

@@ -636,9 +636,16 @@ const helpRequestSchema = new mongoose.Schema({
   helperId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   helperLocation: { lat: Number, lng: Number },
   helperArrived: { type: Boolean, default: false },
-  // Двусторонняя конфирмация завершения
   requesterConfirmed: { type: Boolean, default: false },
   helperConfirmed: { type: Boolean, default: false },
+  messages: [{
+    userId: String,
+    senderName: String,
+    text: String,
+    isHelper: Boolean,
+    time: String,
+    createdAt: { type: Date, default: Date.now }
+  }],
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now },
@@ -3140,6 +3147,64 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Сообщения в помощи на дороге
+app.get('/api/help-requests/:id/messages', async (req, res) => {
+  try {
+    const request = await HelpRequest.findById(req.params.id);
+    res.json(request?.messages || []);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+app.post('/api/help-requests/:id/messages', async (req, res) => {
+  try {
+    const { userId, text } = req.body;
+    const request = await HelpRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ success: false });
+    
+    // Проверка: только участники
+    if (userId !== request.userId?.toString() && userId !== request.helperId?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    const isHelperSender = userId === request.helperId?.toString();
+    const user = await User.findById(userId).select('name').lean();
+    
+    request.messages = request.messages || [];
+    request.messages.push({
+      userId, senderName: user?.name || 'User', text, isHelper: isHelperSender,
+      time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+      createdAt: new Date()
+    });
+    await request.save();
+    
+    // 🔌 WebSocket: новое сообщение
+    const lastMsg = request.messages[request.messages.length - 1];
+    const recipientId = isHelperSender ? request.userId?.toString() : request.helperId?.toString();
+    if (recipientId) {
+      emitToUser(recipientId, 'help:message', { helpRequestId: request._id.toString(), message: lastMsg });
+    }
+    
+    // 📱 Push
+    if (recipientId) {
+      const recipient = await User.findById(recipientId).select('pushToken language').lean();
+      if (recipient?.pushToken) {
+        const lang = recipient.language || 'en';
+        const title = getPushText('message', 'title', lang);
+        const shortText = text.length > 50 ? text.substring(0, 50) + '...' : text;
+        const body = getPushText('message', 'body', lang, { name: user?.name || 'User', text: shortText });
+        sendPushNotification(recipient.pushToken, title, body, { type: 'help_message', helpRequestId: request._id.toString() });
+      }
+    }
+    
+    res.json({ success: true, message: lastMsg });
+  } catch (error) {
+    console.log('HELP MESSAGE ERROR:', error);
     res.status(500).json({ success: false });
   }
 });

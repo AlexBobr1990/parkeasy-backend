@@ -146,6 +146,22 @@ const pushTexts = {
   completedBooker: {
     title: { ru: '🎉 Сделка завершена!', en: '🎉 Deal completed!', es: '🎉 ¡Trato completado!', uk: '🎉 Угоду завершено!' },
     body: { ru: 'Парковка успешно передана. Спасибо!', en: 'Parking spot handed over. Thank you!', es: 'Lugar entregado con éxito. ¡Gracias!', uk: 'Парковку успішно передано. Дякуємо!' }
+  },
+  helpConfirmNeeded: {
+    title: { ru: '✅ Подтвердите помощь', en: '✅ Confirm help', es: '✅ Confirma la ayuda', uk: '✅ Підтвердіть допомогу' },
+    body: { ru: '{name} подтвердил(а) завершение. Подтвердите и вы!', en: '{name} confirmed completion. Please confirm too!', es: '{name} confirmó. ¡Confirma tú también!', uk: '{name} підтвердив(ла) завершення. Підтвердіть і ви!' }
+  },
+  helpCompleted: {
+    title: { ru: '🎉 Помощь завершена!', en: '🎉 Help completed!', es: '🎉 ¡Ayuda completada!', uk: '🎉 Допомогу завершено!' },
+    body: { ru: 'Баллы переведены. Спасибо!', en: 'Points transferred. Thank you!', es: 'Puntos transferidos. ¡Gracias!', uk: 'Бали переведено. Дякуємо!' }
+  },
+  helpAccepted: {
+    title: { ru: '🚗 Помощь принята!', en: '🚗 Help accepted!', es: '🚗 ¡Ayuda aceptada!', uk: '🚗 Допомогу прийнято!' },
+    body: { ru: '{name} едет к вам на помощь', en: '{name} is coming to help you', es: '{name} viene a ayudarte', uk: '{name} їде до вас на допомогу' }
+  },
+  helperArrived: {
+    title: { ru: '📍 Помощник приехал!', en: '📍 Helper arrived!', es: '📍 ¡Ayudante llegó!', uk: '📍 Помічник приїхав!' },
+    body: { ru: '{name} на месте', en: '{name} is at the location', es: '{name} está en el lugar', uk: '{name} на місці' }
   }
 };
 
@@ -2949,6 +2965,19 @@ app.post('/api/help-requests/:id/accept', async (req, res) => {
     emitToUser(request.userId, 'help:accepted', { helpRequest: request.toObject() });
     emitToAll('help:updated', { helpRequestId: request._id.toString() });
     
+    // 📱 Push: уведомляем запрашивающего
+    const [helperUser, requesterUser] = await Promise.all([
+      User.findById(helperId).select('name').lean(),
+      User.findById(request.userId).select('pushToken language').lean()
+    ]);
+    if (requesterUser?.pushToken) {
+      const lang = requesterUser.language || 'en';
+      sendPushNotification(requesterUser.pushToken,
+        getPushText('helpAccepted', 'title', lang),
+        getPushText('helpAccepted', 'body', lang, { name: helperUser?.name || 'Helper' }),
+        { type: 'help_accepted', helpRequestId: request._id.toString() });
+    }
+    
     res.json({ success: true, request });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -2977,6 +3006,19 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
     
     // 🔌 WebSocket: помощник приехал
     emitToUser(request.userId, 'help:helperArrived', { helpRequestId: request._id.toString() });
+    
+    // 📱 Push: уведомляем запрашивающего что помощник приехал
+    const [helperDoc, requesterDoc] = await Promise.all([
+      User.findById(request.helperId).select('name').lean(),
+      User.findById(request.userId).select('pushToken language').lean()
+    ]);
+    if (requesterDoc?.pushToken) {
+      const lang = requesterDoc.language || 'en';
+      sendPushNotification(requesterDoc.pushToken,
+        getPushText('helperArrived', 'title', lang),
+        getPushText('helperArrived', 'body', lang, { name: helperDoc?.name || 'Helper' }),
+        { type: 'helper_arrived', helpRequestId: request._id.toString() });
+    }
     
     res.json({ success: true });
   } catch (error) {
@@ -3038,6 +3080,18 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
         requesterConfirmed: request.requesterConfirmed,
         helperConfirmed: request.helperConfirmed
       });
+      
+      // 📱 Push: уведомляем другую сторону
+      const [caller, otherUserDoc] = await Promise.all([
+        User.findById(callerUserId).select('name').lean(),
+        User.findById(otherUserId).select('pushToken language').lean()
+      ]);
+      if (otherUserDoc?.pushToken) {
+        const lang = otherUserDoc.language || 'en';
+        const title = getPushText('helpConfirmNeeded', 'title', lang);
+        const body = getPushText('helpConfirmNeeded', 'body', lang, { name: caller?.name || 'User' });
+        sendPushNotification(otherUserDoc.pushToken, title, body, { type: 'help_confirm', helpRequestId: request._id.toString() });
+      }
       
       return res.json({ 
         success: true, 
@@ -3109,10 +3163,26 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     
     // 🔌 WebSocket: помощь завершена
     emitToAll('help:completed', { helpRequestId: request._id.toString() });
-    const requesterAfter = await User.findById(request.userId).select('balance').lean();
-    const helperAfter = await User.findById(request.helperId).select('balance').lean();
+    const requesterAfter = await User.findById(request.userId).select('balance pushToken language').lean();
+    const helperAfter = await User.findById(request.helperId).select('balance pushToken language').lean();
     emitToUser(request.userId, 'balance:update', { balance: requesterAfter?.balance });
     emitToUser(request.helperId, 'balance:update', { balance: helperAfter?.balance });
+    
+    // 📱 Push: уведомляем обе стороны о завершении
+    if (requesterAfter?.pushToken) {
+      const lang = requesterAfter.language || 'en';
+      sendPushNotification(requesterAfter.pushToken, 
+        getPushText('helpCompleted', 'title', lang), 
+        getPushText('helpCompleted', 'body', lang),
+        { type: 'help_completed', helpRequestId: request._id.toString() });
+    }
+    if (helperAfter?.pushToken) {
+      const lang = helperAfter.language || 'en';
+      sendPushNotification(helperAfter.pushToken,
+        getPushText('helpCompleted', 'title', lang),
+        getPushText('helpCompleted', 'body', lang),
+        { type: 'help_completed', helpRequestId: request._id.toString() });
+    }
     
     res.json({ success: true, status: 'completed' });
   } catch (error) {

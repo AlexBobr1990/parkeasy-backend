@@ -619,6 +619,9 @@ const helpRequestSchema = new mongoose.Schema({
   helperId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   helperLocation: { lat: Number, lng: Number },
   helperArrived: { type: Boolean, default: false },
+  // Двусторонняя конфирмация завершения
+  requesterConfirmed: { type: Boolean, default: false },
+  helperConfirmed: { type: Boolean, default: false },
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
   createdAt: { type: Date, default: Date.now },
@@ -2971,6 +2974,10 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
     if (!request) return res.status(404).json({ success: false });
     request.helperArrived = true;
     await request.save();
+    
+    // 🔌 WebSocket: помощник приехал
+    emitToUser(request.userId, 'help:helperArrived', { helpRequestId: request._id.toString() });
+    
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -2999,16 +3006,48 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
     
-    // Фикс: проверка статуса — только accepted можно завершить
+    // Проверка статуса — только accepted можно завершить
     if (request.status !== 'accepted') {
       return res.status(400).json({ success: false, message: 'Request is not in accepted status' });
     }
     
-    // Фикс: проверка что вызывает участник сделки
+    // Проверка что вызывает участник сделки
     if (!callerUserId || (callerUserId !== request.userId.toString() && callerUserId !== request.helperId.toString())) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     
+    const isRequester = callerUserId === request.userId.toString();
+    const isHelper = callerUserId === request.helperId.toString();
+    
+    // ШАГ 1: Помечаем подтверждение вызывающей стороны
+    if (isRequester) request.requesterConfirmed = true;
+    if (isHelper) request.helperConfirmed = true;
+    await request.save();
+    
+    // Если только одна сторона подтвердила — ждём вторую
+    if (!request.requesterConfirmed || !request.helperConfirmed) {
+      // 🔌 WebSocket: уведомляем другую сторону что нужно подтвердить
+      const otherUserId = isRequester ? request.helperId : request.userId;
+      emitToUser(otherUserId, 'help:confirmNeeded', { 
+        helpRequestId: request._id.toString(),
+        confirmedBy: isRequester ? 'requester' : 'helper'
+      });
+      // Также обновляем того кто подтвердил
+      emitToUser(callerUserId, 'help:confirmUpdate', { 
+        helpRequestId: request._id.toString(),
+        requesterConfirmed: request.requesterConfirmed,
+        helperConfirmed: request.helperConfirmed
+      });
+      
+      return res.json({ 
+        success: true, 
+        status: 'waiting_confirmation',
+        requesterConfirmed: request.requesterConfirmed,
+        helperConfirmed: request.helperConfirmed
+      });
+    }
+    
+    // ШАГ 2: Обе стороны подтвердили — выполняем оплату
     const requester = await User.findById(request.userId);
     const helper = await User.findById(request.helperId);
     
@@ -3020,7 +3059,6 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Not enough points' });
     }
     
-    // Проверка: нельзя помогать самому себе
     if (request.userId.toString() === request.helperId.toString()) {
       return res.status(400).json({ success: false, message: 'Cannot help yourself' });
     }
@@ -3076,7 +3114,7 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     emitToUser(request.userId, 'balance:update', { balance: requesterAfter?.balance });
     emitToUser(request.helperId, 'balance:update', { balance: helperAfter?.balance });
     
-    res.json({ success: true });
+    res.json({ success: true, status: 'completed' });
   } catch (error) {
     console.log('HELP COMPLETE ERROR:', error);
     res.status(500).json({ success: false, message: error.message });

@@ -1703,9 +1703,15 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
       status: 'pending'
     });
     
-    res.json({ count, friendRequests });
+    // Приглашения в караван
+    const convoyInvites = await Convoy.countDocuments({
+      status: 'active',
+      'members': { $elemMatch: { userId: userId, status: 'invited' } }
+    });
+    
+    res.json({ count, friendRequests, convoyInvites });
   } catch (error) {
-    res.json({ count: 0, friendRequests: 0 });
+    res.json({ count: 0, friendRequests: 0, convoyInvites: 0 });
   }
 });
 

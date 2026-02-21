@@ -4533,14 +4533,7 @@ app.post('/api/convoys/:id/messages', async (req, res) => {
     const convoyRoom = `convoy:${convoy._id.toString()}`;
     io.to(convoyRoom).emit('convoy:message', { convoyId: convoy._id.toString(), message: msg });
     
-    // Также emitToUser для бейджей на MapScreen/FriendsScreen (юзеры не в комнате каравана)
-    for (const m of convoy.members) {
-      if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
-        emitToUser(m.userId.toString(), 'convoy:message', { convoyId: convoy._id.toString(), message: msg });
-      }
-    }
-    
-    // WS: convoy:activity для обновления бейджей на MapScreen/ProfileScreen (вне комнаты)
+    // WS: convoy:activity для обновления бейджей на MapScreen/ProfileScreen/FriendsScreen
     for (const m of convoy.members) {
       if (m.userId?.toString() !== userId && (m.status === 'active' || m.status === 'stopped')) {
         emitToUser(m.userId.toString(), 'convoy:activity', { convoyId: convoy._id.toString() });

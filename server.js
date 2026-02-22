@@ -708,6 +708,47 @@ const appSettingsSchema = new mongoose.Schema({
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
 
+// ==================== ASP (Alternate Side Parking) Models ====================
+
+const aspZoneSchema = new mongoose.Schema({
+  // GeoJSON линия сегмента улицы
+  geometry: {
+    type: { type: String, enum: ['LineString'], required: true },
+    coordinates: { type: [[Number]], required: true } // [[lng, lat], [lng, lat], ...]
+  },
+  streetName: { type: String, index: true },
+  borough: { type: String, enum: ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island'] },
+  side: { type: String, enum: ['left', 'right', 'both'] },
+  // Правила уборки
+  rules: [{
+    days: [{ type: Number }], // 0=Вс, 1=Пн, ... 6=Сб
+    startTime: String, // "08:30"
+    endTime: String,   // "10:00"
+    label: String      // Оригинальный текст знака
+  }],
+  // Для быстрого поиска - центр сегмента
+  center: { lat: Number, lng: Number },
+  sourceId: { type: String, unique: true, sparse: true }, // ID из NYC Open Data для дедупликации
+  createdAt: { type: Date, default: Date.now }
+});
+aspZoneSchema.index({ geometry: '2dsphere' });
+aspZoneSchema.index({ 'center.lat': 1, 'center.lng': 1 });
+const ASPZone = mongoose.model('ASPZone', aspZoneSchema);
+
+const aspSuspensionSchema = new mongoose.Schema({
+  date: { type: String, required: true, unique: true }, // "2026-02-23" формат
+  reason: {
+    en: String,
+    ru: String,
+    uk: String,
+    es: String
+  },
+  type: { type: String, enum: ['holiday', 'snow', 'emergency', 'other'], default: 'holiday' },
+  createdAt: { type: Date, default: Date.now }
+});
+aspSuspensionSchema.index({ date: 1 });
+const ASPSuspension = mongoose.model('ASPSuspension', aspSuspensionSchema);
+
 // Кэш для AppSettings
 let cachedAppSettings = null;
 let appSettingsCacheTime = 0;
@@ -5619,6 +5660,241 @@ app.put('/api/settings/booking-radius', async (req, res) => {
     
     console.log(`📏 Booking radius updated to ${radius} km`);
     res.json({ success: true, bookingRadiusKm: radius });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== ASP (Alternate Side Parking) Routes ====================
+
+// Получить статус ASP на сегодня
+app.get('/api/asp/status', async (req, res) => {
+  try {
+    const today = new Date();
+    const nyDate = new Date(today.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const dateStr = nyDate.toISOString().split('T')[0]; // "2026-02-22"
+    const dayOfWeek = nyDate.getDay(); // 0=Sun, 6=Sat
+
+    // Проверяем приостановку
+    const suspension = await ASPSuspension.findOne({ date: dateStr });
+
+    // Ищем следующую приостановку (для отображения)
+    const nextSuspension = await ASPSuspension.findOne({ date: { $gt: dateStr } }).sort({ date: 1 });
+
+    res.json({
+      success: true,
+      date: dateStr,
+      dayOfWeek,
+      suspended: !!suspension,
+      reason: suspension ? suspension.reason : null,
+      type: suspension ? suspension.type : null,
+      nextSuspension: nextSuspension ? { date: nextSuspension.date, reason: nextSuspension.reason, type: nextSuspension.type } : null
+    });
+  } catch (error) {
+    console.error('ASP status error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Получить ASP-зоны рядом с координатами
+app.get('/api/asp/zones', async (req, res) => {
+  try {
+    const { lat, lng, radius } = req.query;
+    const latitude = parseFloat(lat);
+    const longitude = parseFloat(lng);
+    const radiusMeters = Math.min(parseInt(radius) || 1000, 3000); // Макс 3км
+
+    if (!latitude || !longitude) {
+      return res.status(400).json({ success: false, message: 'lat and lng required' });
+    }
+
+    // Текущий день и время в NY
+    const now = new Date();
+    const nyNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const dateStr = nyNow.toISOString().split('T')[0];
+    const dayOfWeek = nyNow.getDay();
+    const currentTime = nyNow.getHours().toString().padStart(2, '0') + ':' + nyNow.getMinutes().toString().padStart(2, '0');
+
+    // Проверяем приостановку
+    const suspension = await ASPSuspension.findOne({ date: dateStr });
+    const isSuspended = !!suspension;
+
+    // Гео-запрос: зоны в радиусе
+    const zones = await ASPZone.find({
+      geometry: {
+        $nearSphere: {
+          $geometry: { type: 'Point', coordinates: [longitude, latitude] },
+          $maxDistance: radiusMeters
+        }
+      }
+    }).limit(200).lean();
+
+    // Добавляем статус каждой зоне
+    const zonesWithStatus = zones.map(zone => {
+      let status = 'free'; // можно парковаться
+
+      if (!isSuspended) {
+        for (const rule of zone.rules) {
+          if (rule.days.includes(dayOfWeek)) {
+            if (currentTime >= rule.startTime && currentTime < rule.endTime) {
+              status = 'active'; // уборка прямо сейчас, нельзя парковаться
+            } else if (currentTime < rule.startTime) {
+              // Уборка скоро
+              const [rH, rM] = rule.startTime.split(':').map(Number);
+              const [cH, cM] = currentTime.split(':').map(Number);
+              const diffMin = (rH * 60 + rM) - (cH * 60 + cM);
+              if (diffMin <= 60 && diffMin > 0) {
+                status = 'soon'; // уборка через час или меньше
+              }
+            }
+          }
+        }
+      }
+
+      return {
+        _id: zone._id,
+        geometry: zone.geometry,
+        streetName: zone.streetName,
+        side: zone.side,
+        rules: zone.rules,
+        status: isSuspended ? 'suspended' : status
+      };
+    });
+
+    res.json({
+      success: true,
+      suspended: isSuspended,
+      suspensionReason: suspension ? suspension.reason : null,
+      count: zonesWithStatus.length,
+      zones: zonesWithStatus
+    });
+  } catch (error) {
+    console.error('ASP zones error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Получить правила ASP для конкретной зоны
+app.get('/api/asp/zones/:id', async (req, res) => {
+  try {
+    const zone = await ASPZone.findById(req.params.id).lean();
+    if (!zone) return res.status(404).json({ success: false, message: 'Zone not found' });
+    res.json({ success: true, zone });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: импорт ASP-зон (из подготовленного JSON)
+app.post('/api/admin/asp/import-zones', async (req, res) => {
+  try {
+    const { secret } = req.body;
+    const ADMIN_SECRET = process.env.ADMIN_SECRET || 'parkbro-admin-2024';
+    if (secret !== ADMIN_SECRET) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
+    }
+
+    const { zones } = req.body; // массив зон
+    if (!zones || !Array.isArray(zones)) {
+      return res.status(400).json({ success: false, message: 'zones array required' });
+    }
+
+    let imported = 0;
+    let skipped = 0;
+
+    for (const z of zones) {
+      try {
+        // Дедупликация по sourceId
+        if (z.sourceId) {
+          const existing = await ASPZone.findOne({ sourceId: z.sourceId });
+          if (existing) { skipped++; continue; }
+        }
+
+        await ASPZone.create({
+          geometry: z.geometry,
+          streetName: z.streetName,
+          borough: z.borough,
+          side: z.side || 'both',
+          rules: z.rules,
+          center: z.center,
+          sourceId: z.sourceId
+        });
+        imported++;
+      } catch (e) {
+        skipped++;
+      }
+    }
+
+    console.log(`🅿️ ASP import: ${imported} imported, ${skipped} skipped`);
+    res.json({ success: true, imported, skipped });
+  } catch (error) {
+    console.error('ASP import error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: добавить приостановки ASP
+app.post('/api/admin/asp/suspensions', async (req, res) => {
+  try {
+    const { secret, suspensions } = req.body;
+    const ADMIN_SECRET = process.env.ADMIN_SECRET || 'parkbro-admin-2024';
+    if (secret !== ADMIN_SECRET) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
+    }
+
+    if (!suspensions || !Array.isArray(suspensions)) {
+      return res.status(400).json({ success: false, message: 'suspensions array required' });
+    }
+
+    let added = 0;
+    let skipped = 0;
+
+    for (const s of suspensions) {
+      try {
+        await ASPSuspension.findOneAndUpdate(
+          { date: s.date },
+          { date: s.date, reason: s.reason, type: s.type || 'holiday' },
+          { upsert: true }
+        );
+        added++;
+      } catch (e) {
+        skipped++;
+      }
+    }
+
+    console.log(`📅 ASP suspensions: ${added} added, ${skipped} skipped`);
+    res.json({ success: true, added, skipped });
+  } catch (error) {
+    console.error('ASP suspensions error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: получить все приостановки
+app.get('/api/admin/asp/suspensions', async (req, res) => {
+  try {
+    const suspensions = await ASPSuspension.find().sort({ date: 1 }).lean();
+    res.json({ success: true, suspensions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: статистика ASP-зон
+app.get('/api/admin/asp/stats', async (req, res) => {
+  try {
+    const totalZones = await ASPZone.countDocuments();
+    const byBorough = await ASPZone.aggregate([
+      { $group: { _id: '$borough', count: { $sum: 1 } } }
+    ]);
+    const totalSuspensions = await ASPSuspension.countDocuments();
+
+    res.json({
+      success: true,
+      totalZones,
+      byBorough: byBorough.reduce((acc, b) => { acc[b._id || 'unknown'] = b.count; return acc; }, {}),
+      totalSuspensions
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

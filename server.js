@@ -717,6 +717,8 @@ const aspZoneSchema = new mongoose.Schema({
     coordinates: { type: [[Number]], required: true } // [[lng, lat], [lng, lat], ...]
   },
   streetName: { type: String, index: true },
+  fromStreet: String,
+  toStreet: String,
   borough: { type: String, enum: ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island'] },
   side: { type: String, enum: ['left', 'right', 'both'] },
   // Правила уборки
@@ -5880,6 +5882,20 @@ app.get('/api/admin/asp/suspensions', async (req, res) => {
 });
 
 // Админ: статистика ASP-зон
+// Админ: очистка всех ASP-зон (для переимпорта)
+app.delete('/api/admin/asp/clear-zones', async (req, res) => {
+  try {
+    const secret = req.headers['x-admin-secret'] || req.query?.secret;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
+    }
+    const result = await ASPZone.deleteMany({});
+    res.json({ success: true, message: `Deleted ${result.deletedCount} zones`, deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.get('/api/admin/asp/stats', async (req, res) => {
   try {
     const totalZones = await ASPZone.countDocuments();

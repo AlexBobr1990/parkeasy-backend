@@ -5788,9 +5788,8 @@ app.get('/api/asp/zones/:id', async (req, res) => {
 // Админ: импорт ASP-зон (из подготовленного JSON)
 app.post('/api/admin/asp/import-zones', async (req, res) => {
   try {
-    const { secret } = req.body;
-    const ADMIN_SECRET = process.env.ADMIN_SECRET || 'parkbro-admin-2024';
-    if (secret !== ADMIN_SECRET) {
+    const secret = req.headers['x-admin-secret'] || req.body?.secret;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
       return res.status(403).json({ success: false, message: 'Admin access denied' });
     }
 
@@ -5836,12 +5835,12 @@ app.post('/api/admin/asp/import-zones', async (req, res) => {
 // Админ: добавить приостановки ASP
 app.post('/api/admin/asp/suspensions', async (req, res) => {
   try {
-    const { secret, suspensions } = req.body;
-    const ADMIN_SECRET = process.env.ADMIN_SECRET || 'parkbro-admin-2024';
-    if (secret !== ADMIN_SECRET) {
+    const secret = req.headers['x-admin-secret'] || req.body?.secret;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
       return res.status(403).json({ success: false, message: 'Admin access denied' });
     }
 
+    const { suspensions } = req.body;
     if (!suspensions || !Array.isArray(suspensions)) {
       return res.status(400).json({ success: false, message: 'suspensions array required' });
     }

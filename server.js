@@ -1010,7 +1010,8 @@ app.post('/api/auth/register', rateLimit('register', 5, 3600000), async (req, re
         referralCode: newUser.referralCode,
         referralCount: 0,
         rating: newUser.rating,
-        emailVerified: newUser.emailVerified
+        emailVerified: newUser.emailVerified,
+        createdAt: newUser.createdAt
       },
       verificationRequired: true
     });
@@ -1901,7 +1902,7 @@ app.post('/api/parkings/:id/send-to-friend', async (req, res) => {
 app.get('/api/users/:id/stats', async (req, res) => {
   try {
     const user = await User.findById(req.params.id)
-      .select('parkingsGiven parkingsReceived rating ratingCount referralCount')
+      .select('parkingsGiven parkingsReceived rating ratingCount referralCount createdAt')
       .lean();
     if (!user) return res.status(404).json({ success: false });
     
@@ -1931,6 +1932,7 @@ app.get('/api/users/:id/stats', async (req, res) => {
       rating: user.rating,
       ratingCount: user.ratingCount,
       referralCount: user.referralCount || 0,
+      createdAt: user.createdAt,
       achievements
     });
   } catch (error) {
@@ -2627,7 +2629,8 @@ app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => 
           referralCount: user.referralCount || 0,
           rating: user.rating,
           ratingCount: user.ratingCount,
-          emailVerified: user.emailVerified
+          emailVerified: user.emailVerified,
+          createdAt: user.createdAt
         }
       });
     } else {
@@ -2744,7 +2747,8 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
         isAdmin: user.isAdmin || false,
         referralCode: user.referralCode,
         rating: user.rating,
-        emailVerified: user.emailVerified
+        emailVerified: user.emailVerified,
+        createdAt: user.createdAt
       }
     });
   } catch (error) {
@@ -2844,7 +2848,8 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
         isAdmin: user.isAdmin || false,
         referralCode: user.referralCode,
         rating: user.rating,
-        emailVerified: user.emailVerified
+        emailVerified: user.emailVerified,
+        createdAt: user.createdAt
       }
     });
   } catch (error) {

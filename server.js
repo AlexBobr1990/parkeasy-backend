@@ -4697,11 +4697,33 @@ app.post('/api/admin/users/balance', async (req, res) => {
     if (user.balance < 0) user.balance = 0;
     await user.save();
     await new Transaction({ userId, type: amount > 0 ? 'bonus' : 'penalty', amount, description: reason || 'Admin adjustment' }).save();
-    emitToUser(userId, 'balance:update', { balance: user.balance });
+    
+    // Debug: check if user has active sockets
+    const userIdStr = userId?.toString();
+    const sockets = userSockets.get(userIdStr);
+    console.log(`💰 Admin balance change: userId=${userIdStr}, amount=${amount}, newBalance=${user.balance}, activeSockets=${sockets ? sockets.size : 0}, allConnected=${Array.from(userSockets.keys()).join(',')}`);
+    
+    emitToUser(userIdStr, 'balance:update', { balance: user.balance });
     res.json({ success: true, newBalance: user.balance });
   } catch (error) {
     console.log("ADMIN BALANCE ERROR:", error);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: WS-уведомление об изменении баланса
+app.post('/api/admin/emit-balance', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const user = await User.findById(userId).select('balance').lean();
+    if (!user) return res.status(404).json({ success: false });
+    const userIdStr = userId?.toString();
+    const sockets = userSockets.get(userIdStr);
+    console.log(`📡 Admin emit-balance: userId=${userIdStr}, balance=${user.balance}, sockets=${sockets ? sockets.size : 0}`);
+    emitToUser(userIdStr, 'balance:update', { balance: user.balance });
+    res.json({ success: true, balance: user.balance, socketsNotified: sockets ? sockets.size : 0 });
+  } catch (error) {
+    res.status(500).json({ success: false });
   }
 });
 

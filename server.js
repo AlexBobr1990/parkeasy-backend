@@ -4096,7 +4096,7 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
     emitToUser(parking.bookedBy, 'balance:update', { balance: bookerBalanceAfter?.balance });
     
     // Обновляем прогресс заданий
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayDate();
     
     // Owner - give_parking
     const ownerProgress = await UserDailyProgress.findOne({ userId: parking.ownerId, date: today });

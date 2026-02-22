@@ -4679,10 +4679,50 @@ app.post("/api/admin/add-points", async (req, res) => {
     user.balance += amount;
     await user.save();
     await new Transaction({ userId, type: "bonus", amount, description: "Админ начисление" }).save();
+    emitToUser(userId, 'balance:update', { balance: user.balance });
     res.json({ success: true, newBalance: user.balance });
   } catch (error) {
-    console.log("CREATE PARKING ERROR:", error);
+    console.log("ADD POINTS ERROR:", error);
     res.status(500).json({ success: false });
+  }
+});
+
+// Админ: изменение баланса (из панели юзера)
+app.post('/api/admin/users/balance', async (req, res) => {
+  try {
+    const { userId, amount, reason } = req.body;
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    user.balance += amount;
+    if (user.balance < 0) user.balance = 0;
+    await user.save();
+    await new Transaction({ userId, type: amount > 0 ? 'bonus' : 'penalty', amount, description: reason || 'Admin adjustment' }).save();
+    emitToUser(userId, 'balance:update', { balance: user.balance });
+    res.json({ success: true, newBalance: user.balance });
+  } catch (error) {
+    console.log("ADMIN BALANCE ERROR:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Админ: один юзер
+app.get('/api/admin/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).lean();
+    if (!user) return res.status(404).json({ success: false });
+    res.json({ user });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Админ: история транзакций юзера
+app.get('/api/admin/users/:id/history', async (req, res) => {
+  try {
+    const transactions = await Transaction.find({ userId: req.params.id }).sort({ createdAt: -1 }).limit(100).lean();
+    res.json(transactions);
+  } catch (error) {
+    res.json([]);
   }
 });
 

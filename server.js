@@ -721,7 +721,9 @@ const aspZoneSchema = new mongoose.Schema({
   toStreet: String,
   borough: { type: String, enum: ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island'] },
   side: { type: String, enum: ['left', 'right', 'both'] },
-  // Правила уборки
+  // Тип зоны
+  zoneType: { type: String, enum: ['asp', 'no_parking', 'no_standing', 'school', 'hydrant'], default: 'asp', index: true },
+  // Правила уборки / ограничений
   rules: [{
     days: [{ type: Number }], // 0=Вс, 1=Пн, ... 6=Сб
     startTime: String, // "08:30"
@@ -5701,13 +5703,27 @@ app.get('/api/asp/status', async (req, res) => {
 // Получить ASP-зоны рядом с координатами
 app.get('/api/asp/zones', async (req, res) => {
   try {
-    const { lat, lng, radius } = req.query;
+    const { lat, lng, radius, types } = req.query;
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
     const radiusMeters = Math.min(parseInt(radius) || 1000, 3000); // Макс 3км
 
     if (!latitude || !longitude) {
       return res.status(400).json({ success: false, message: 'lat and lng required' });
+    }
+
+    // Фильтр по типу зоны (опционально)
+    const query = {
+      geometry: {
+        $nearSphere: {
+          $geometry: { type: 'Point', coordinates: [longitude, latitude] },
+          $maxDistance: radiusMeters
+        }
+      }
+    };
+    if (types) {
+      const typeList = types.split(',').filter(t => ['asp', 'no_parking', 'no_standing', 'school', 'hydrant'].includes(t));
+      if (typeList.length > 0) query.zoneType = { $in: typeList };
     }
 
     // Текущий день и время в NY
@@ -5722,31 +5738,34 @@ app.get('/api/asp/zones', async (req, res) => {
     const isSuspended = !!suspension;
 
     // Гео-запрос: зоны в радиусе
-    const zones = await ASPZone.find({
-      geometry: {
-        $nearSphere: {
-          $geometry: { type: 'Point', coordinates: [longitude, latitude] },
-          $maxDistance: radiusMeters
-        }
-      }
-    }).limit(2000).lean();
+    const zones = await ASPZone.find(query).limit(2000).lean();
+
+    // Штрафы по типу зоны
+    const fines = { asp: 65, no_parking: 115, no_standing: 115, school: 115, hydrant: 115 };
 
     // Добавляем статус каждой зоне
     const zonesWithStatus = zones.map(zone => {
       let status = 'free'; // можно парковаться
+      const zt = zone.zoneType || 'asp';
 
-      if (!isSuspended) {
-        for (const rule of zone.rules) {
-          if (rule.days.includes(dayOfWeek)) {
-            if (currentTime >= rule.startTime && currentTime < rule.endTime) {
-              status = 'active'; // уборка прямо сейчас, нельзя парковаться
-            } else if (currentTime < rule.startTime) {
-              // Уборка скоро
-              const [rH, rM] = rule.startTime.split(':').map(Number);
-              const [cH, cM] = currentTime.split(':').map(Number);
-              const diffMin = (rH * 60 + rM) - (cH * 60 + cM);
-              if (diffMin <= 60 && diffMin > 0) {
-                status = 'soon'; // уборка через час или меньше
+      if (zt === 'hydrant') {
+        // Гидрант — запрет 24/7
+        status = 'active';
+      } else if (!isSuspended || zt !== 'asp') {
+        // ASP зависит от suspension, остальные — нет
+        const checkSuspension = zt === 'asp' && isSuspended;
+        if (!checkSuspension) {
+          for (const rule of zone.rules) {
+            if (rule.days.includes(dayOfWeek)) {
+              if (currentTime >= rule.startTime && currentTime < rule.endTime) {
+                status = 'active';
+              } else if (currentTime < rule.startTime) {
+                const [rH, rM] = rule.startTime.split(':').map(Number);
+                const [cH, cM] = currentTime.split(':').map(Number);
+                const diffMin = (rH * 60 + rM) - (cH * 60 + cM);
+                if (diffMin <= 60 && diffMin > 0) {
+                  status = 'soon';
+                }
               }
             }
           }
@@ -5759,7 +5778,9 @@ app.get('/api/asp/zones', async (req, res) => {
         streetName: zone.streetName,
         side: zone.side,
         rules: zone.rules,
-        status: isSuspended ? 'suspended' : status
+        zoneType: zt,
+        fine: fines[zt] || 65,
+        status: (zt === 'asp' && isSuspended) ? 'suspended' : status
       };
     });
 
@@ -5816,6 +5837,7 @@ app.post('/api/admin/asp/import-zones', async (req, res) => {
           streetName: z.streetName,
           borough: z.borough,
           side: z.side || 'both',
+          zoneType: z.zoneType || 'asp',
           rules: z.rules,
           center: z.center,
           sourceId: z.sourceId
@@ -5970,12 +5992,16 @@ app.get('/api/admin/asp/stats', async (req, res) => {
     const byBorough = await ASPZone.aggregate([
       { $group: { _id: '$borough', count: { $sum: 1 } } }
     ]);
+    const byZoneType = await ASPZone.aggregate([
+      { $group: { _id: '$zoneType', count: { $sum: 1 } } }
+    ]);
     const totalSuspensions = await ASPSuspension.countDocuments();
 
     res.json({
       success: true,
       totalZones,
       byBorough: byBorough.reduce((acc, b) => { acc[b._id || 'unknown'] = b.count; return acc; }, {}),
+      byZoneType: byZoneType.reduce((acc, b) => { acc[b._id || 'asp'] = b.count; return acc; }, {}),
       totalSuspensions
     });
   } catch (error) {

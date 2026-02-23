@@ -5729,7 +5729,7 @@ app.get('/api/asp/zones', async (req, res) => {
           $maxDistance: radiusMeters
         }
       }
-    }).limit(500).lean();
+    }).limit(2000).lean();
 
     // Добавляем статус каждой зоне
     const zonesWithStatus = zones.map(zone => {

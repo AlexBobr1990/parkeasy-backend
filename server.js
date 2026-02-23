@@ -6009,6 +6009,78 @@ app.get('/api/admin/asp/stats', async (req, res) => {
   }
 });
 
+// ==================== Parking Tickets Check ====================
+
+// Check parking/camera violations by license plate via NYC Open Data
+app.get('/api/tickets/check', async (req, res) => {
+  try {
+    const { plate, state } = req.query;
+    if (!plate) return res.status(400).json({ success: false, message: 'plate is required' });
+    
+    const cleanPlate = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const stateCode = (state || 'NY').toUpperCase();
+    
+    // NYC Open Data - Open Parking and Camera Violations (nc67-uf89)
+    const url = `https://data.cityofnewyork.us/resource/nc67-uf89.json?plate=${encodeURIComponent(cleanPlate)}&state=${encodeURIComponent(stateCode)}&$limit=100&$order=issue_date DESC`;
+    
+    const response = await fetch(url);
+    if (!response.ok) {
+      return res.status(502).json({ success: false, message: 'NYC Open Data unavailable' });
+    }
+    
+    const tickets = await response.json();
+    
+    // Calculate summary
+    let totalDue = 0;
+    let totalPaid = 0;
+    let openCount = 0;
+    
+    const formatted = tickets.map(t => {
+      const due = parseFloat(t.amount_due) || 0;
+      const fine = parseFloat(t.fine_amount) || 0;
+      const penalty = parseFloat(t.penalty_amount) || 0;
+      const interest = parseFloat(t.interest_amount) || 0;
+      const paid = parseFloat(t.payment_amount) || 0;
+      
+      if (due > 0) {
+        totalDue += due;
+        openCount++;
+      }
+      totalPaid += paid;
+      
+      return {
+        summons: t.summons_number,
+        plate: t.plate,
+        state: t.state,
+        issueDate: t.issue_date,
+        violation: t.violation,
+        county: t.county,
+        fineAmount: fine,
+        penaltyAmount: penalty,
+        interestAmount: interest,
+        reductionAmount: parseFloat(t.reduction_amount) || 0,
+        paymentAmount: paid,
+        amountDue: due,
+        status: due > 0 ? 'open' : 'paid'
+      };
+    });
+    
+    res.json({
+      success: true,
+      plate: cleanPlate,
+      state: stateCode,
+      total: formatted.length,
+      openCount,
+      totalDue: Math.round(totalDue * 100) / 100,
+      totalPaid: Math.round(totalPaid * 100) / 100,
+      tickets: formatted
+    });
+  } catch (error) {
+    console.error('Tickets check error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // ==================== START ====================
 
 const server = httpServer.listen(PORT, () => {

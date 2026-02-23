@@ -5937,6 +5937,33 @@ app.post('/api/admin/asp/update-geometries', async (req, res) => {
   }
 });
 
+// Admin: batch update ASP zone rules (for fixing day parsing)
+app.post('/api/admin/asp/fix-rules', async (req, res) => {
+  try {
+    const secret = req.headers['x-admin-secret'] || req.query?.secret;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
+    }
+    const { updates } = req.body;
+    if (!updates || !Array.isArray(updates)) {
+      return res.status(400).json({ success: false, message: 'updates array required' });
+    }
+    let updated = 0, errors = 0;
+    for (const u of updates) {
+      try {
+        await ASPZone.updateOne(
+          { _id: u.zoneId },
+          { $set: { rules: u.rules } }
+        );
+        updated++;
+      } catch (e) { errors++; }
+    }
+    res.json({ success: true, updated, errors });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.get('/api/admin/asp/stats', async (req, res) => {
   try {
     const totalZones = await ASPZone.countDocuments();

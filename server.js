@@ -365,6 +365,10 @@ const userSchema = new mongoose.Schema({
     brand: String, model: String, color: String, plate: String,
     size: String, length: Number, width: Number, year: String
   },
+  cars: [{
+    brand: String, model: String, color: String, plate: String,
+    size: String, length: Number, width: Number, year: String
+  }],
   avatar: String,
   avatarThumb: String, // Миниатюра 80x80 для списков
   language: { type: String, default: 'ru' },
@@ -2667,6 +2671,7 @@ app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => 
           name: user.name,
           balance: user.balance,
           car: user.car,
+          cars: user.cars || [],
           avatar: user.avatar,
           language: user.language || 'ru',
           isAdmin: user.isAdmin || false,
@@ -2787,6 +2792,7 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
         name: user.name,
         balance: user.balance,
         car: user.car,
+        cars: user.cars || [],
         avatar: user.avatar,
         language: user.language || 'ru',
         isAdmin: user.isAdmin || false,
@@ -2888,6 +2894,7 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
         name: user.name,
         balance: user.balance,
         car: user.car,
+        cars: user.cars || [],
         avatar: user.avatar,
         language: user.language || 'ru',
         isAdmin: user.isAdmin || false,
@@ -3058,12 +3065,13 @@ app.get('/api/users/:id', async (req, res) => {
 
 app.put("/api/users/:id", async (req, res) => {
   try {
-    const { car, avatar, language } = req.body;
+    const { car, cars, avatar, language } = req.body;
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
     
     // Разрешаем менять ТОЛЬКО безопасные поля
-    if (car) user.car = car;
+    if (car !== undefined) user.car = car;
+    if (cars !== undefined) user.cars = (cars || []).slice(0, 3); // max 3 cars
     if (avatar) {
       const cloudinaryUrl = await uploadToCloudinary(avatar, req.params.id);
       if (cloudinaryUrl) {
@@ -4660,6 +4668,7 @@ app.get("/api/admin/export-users", async (req, res) => {
         emailVerified: user.emailVerified,
         isAdmin: user.isAdmin,
         car: user.car,
+        cars: user.cars || [],
         createdAt: user.createdAt,
         totalEarned,
         totalSpent,

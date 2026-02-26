@@ -4393,7 +4393,7 @@ app.get('/api/users/:id/convoys', async (req, res) => {
   try {
     const userId = req.params.id;
     const convoys = await Convoy.find({ 
-      'members.userId': userId, 
+      members: { $elemMatch: { userId: userId, status: { $ne: 'left' } } },
       status: 'active' 
     }).sort({ createdAt: -1 }).lean();
     
@@ -4458,6 +4458,15 @@ app.post('/api/convoys/:id/leave', async (req, res) => {
     
     const member = convoy.members.find(m => m.userId?.toString() === userId);
     if (member) member.status = 'left';
+    
+    // Авто-завершение если все кроме создателя вышли
+    const activeMembers = convoy.members.filter(m => 
+      m.userId?.toString() !== convoy.creatorId.toString() && m.status !== 'left' && m.status !== 'invited'
+    );
+    if (activeMembers.length === 0) {
+      convoy.status = 'completed';
+    }
+    
     await convoy.save();
     
     // WS

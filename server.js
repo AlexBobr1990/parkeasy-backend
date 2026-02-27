@@ -170,6 +170,157 @@ const getPushText = (type, field, lang, vars = {}) => {
   return Object.entries(vars).reduce((t, [k, v]) => t.replace(`{${k}}`, v), text);
 };
 
+// ==================== MOTIVATIONAL DAILY PUSH ====================
+
+const motivationalMessages = [
+  // Category 1: Daily bonus / Streak
+  {
+    id: 'daily_bonus',
+    title: { en: 'Your daily bonus awaits!', ru: 'Твой ежедневный бонус ждет!', uk: 'Твій щоденний бонус чекає!', es: 'Tu bono diario te espera!' },
+    body: { en: 'Log in and collect your reward - keep the streak going!', ru: 'Зайди и забери награду - не ломай серию!', uk: 'Зайди і забери нагороду - не ламай серію!', es: 'Entra y recoge tu premio - no rompas la racha!' }
+  },
+  {
+    id: 'streak_remind',
+    title: { en: 'Keep your streak alive!', ru: 'Не потеряй серию!', uk: 'Не втрать серію!', es: 'No pierdas tu racha!' },
+    body: { en: 'Your daily tasks are ready. Complete them for bonus points!', ru: 'Ежедневные задания готовы. Выполни их ради бонусных баллов!', uk: 'Щоденні завдання готові. Виконай їх заради бонусних балів!', es: 'Tus tareas diarias estan listas. Completalas por puntos extra!' }
+  },
+  // Category 2: Community stats (dynamic - {totalUsers}, {todayParkings})
+  {
+    id: 'community_size',
+    title: { en: 'The brotherhood grows!', ru: 'Братство растет!', uk: 'Братство зростає!', es: 'La hermandad crece!' },
+    body: { en: 'We are already {totalUsers} drivers strong. Together we find parking faster!', ru: 'Нас уже {totalUsers}! Вместе мы находим парковку быстрее!', uk: 'Нас вже {totalUsers}! Разом ми знаходимо паркування швидше!', es: 'Ya somos {totalUsers} conductores. Juntos encontramos parking mas rapido!' }
+  },
+  {
+    id: 'today_helped',
+    title: { en: 'Brotherhood in action!', ru: 'Братство в действии!', uk: 'Братство в дії!', es: 'Hermandad en accion!' },
+    body: { en: 'Today our community helped {todayParkings} drivers find parking!', ru: 'Сегодня братство помогло {todayParkings} водителям найти парковку!', uk: 'Сьогодні братство допомогло {todayParkings} водіям знайти паркування!', es: 'Hoy la hermandad ayudo a {todayParkings} conductores a encontrar parking!' }
+  },
+  // Category 3: Motivational / Brotherhood philosophy
+  {
+    id: 'karma',
+    title: { en: 'Share the spot, grow the karma', ru: 'Поделись местом - прокачай карму', uk: 'Поділись місцем - прокачай карму', es: 'Comparte el lugar, crece el karma' },
+    body: { en: 'The more you help the community, the more it helps you back!', ru: 'Чем больше ты помогаешь сообществу, тем больше оно поможет тебе!', uk: 'Чим більше ти допомагаєш спільноті, тим більше вона допоможе тобі!', es: 'Cuanto mas ayudas a la comunidad, mas te ayudara a ti!' }
+  },
+  {
+    id: 'brotherhood_spirit',
+    title: { en: 'You are part of something bigger', ru: 'Ты часть чего-то большего', uk: 'Ти частина чогось більшого', es: 'Eres parte de algo mas grande' },
+    body: { en: 'Every shared spot makes NYC a little easier for all of us', ru: 'Каждое отданное место делает Нью-Йорк чуть проще для всех нас', uk: 'Кожне віддане місце робить Нью-Йорк трохи простішим для всіх нас', es: 'Cada lugar compartido hace Nueva York un poco mas facil para todos' }
+  },
+  {
+    id: 'every_spot_counts',
+    title: { en: 'Every spot counts!', ru: 'Каждое место на счету!', uk: 'Кожне місце на рахунку!', es: 'Cada lugar cuenta!' },
+    body: { en: 'Leaving a spot? Share it with the brotherhood - someone nearby is looking!', ru: 'Уезжаешь? Поделись местом - кто-то рядом ищет!', uk: 'Виїжджаєш? Поділися місцем - хтось поруч шукає!', es: 'Te vas? Comparte tu lugar - alguien cerca esta buscando!' }
+  },
+  // Category 4: Engagement nudge
+  {
+    id: 'check_tasks',
+    title: { en: 'New day, new tasks!', ru: 'Новый день - новые задания!', uk: 'Новий день - нові завдання!', es: 'Nuevo dia, nuevas tareas!' },
+    body: { en: 'Complete daily tasks and climb the leaderboard', ru: 'Выполняй ежедневные задания и поднимайся в рейтинге', uk: 'Виконуй щоденні завдання і піднімайся в рейтингу', es: 'Completa tareas diarias y sube en el ranking' }
+  },
+  {
+    id: 'level_up_nudge',
+    title: { en: 'Level up is closer than you think!', ru: 'Новый уровень ближе, чем ты думаешь!', uk: 'Новий рівень ближче, ніж ти думаєш!', es: 'Subir de nivel esta mas cerca de lo que piensas!' },
+    body: { en: 'Share a spot today and earn points toward your next level', ru: 'Поделись местом сегодня и заработай баллы для нового уровня', uk: 'Поділися місцем сьогодні і заробляй бали для нового рівня', es: 'Comparte un lugar hoy y gana puntos para tu proximo nivel' }
+  },
+  // Category 5: Feature awareness
+  {
+    id: 'sos_reminder',
+    title: { en: 'Flat tire? Dead battery?', ru: 'Спустило колесо? Сел аккумулятор?', uk: 'Спустило колесо? Сів акумулятор?', es: 'Llanta ponchada? Bateria muerta?' },
+    body: { en: 'The brotherhood has your back - use SOS and a bro will come help!', ru: 'Братство поможет - нажми SOS и бро приедет на помощь!', uk: 'Братство допоможе - натисни SOS і бро приїде на допомогу!', es: 'La hermandad te apoya - usa SOS y un bro vendra a ayudar!' }
+  },
+  {
+    id: 'convoy_reminder',
+    title: { en: 'Road trip with friends?', ru: 'Едешь с друзьями?', uk: 'Їдеш з друзями?', es: 'Viaje con amigos?' },
+    body: { en: 'Try Convoy mode - see your friends on the map in real time!', ru: 'Попробуй режим Конвой - видь друзей на карте в реальном времени!', uk: 'Спробуй режим Конвой - бач друзів на мапі в реальному часі!', es: 'Prueba el modo Convoy - ve a tus amigos en el mapa en tiempo real!' }
+  },
+  {
+    id: 'towed_car_tip',
+    title: { en: 'Got towed? Do not panic', ru: 'Эвакуировали? Не паникуй', uk: 'Евакуювали? Не панікуй', es: 'Te remolcaron? No te asustes' },
+    body: { en: 'ParkBro helps you find your car, know your rights and calculate costs', ru: 'ParkBro поможет найти машину, знать свои права и рассчитать расходы', uk: 'ParkBro допоможе знайти машину, знати свої права і розрахувати витрати', es: 'ParkBro te ayuda a encontrar tu auto, conocer tus derechos y calcular costos' }
+  }
+];
+
+// Daily push cron - checks every hour, sends at 11 AM EST (16:00 UTC)
+let lastDailyPushDate = null;
+
+const sendDailyMotivationalPush = async () => {
+  try {
+    const now = new Date();
+    const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
+    const todayStr = now.toISOString().split('T')[0];
+
+    // Only send at 11 AM EST, once per day
+    if (estHour !== 11 || lastDailyPushDate === todayStr) return;
+    lastDailyPushDate = todayStr;
+
+    console.log('📬 Starting daily motivational push...');
+
+    // Gather dynamic stats
+    const totalUsers = await User.countDocuments();
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const todayParkings = await Booking.countDocuments({ completedAt: { $gte: todayStart } });
+    // If no parkings today yet (it is morning), use yesterday
+    let parkingsCount = todayParkings;
+    if (parkingsCount === 0) {
+      const yesterdayStart = new Date(todayStart);
+      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+      parkingsCount = await Booking.countDocuments({ completedAt: { $gte: yesterdayStart, $lt: todayStart } });
+    }
+
+    // Get all users with push tokens who haven't muted
+    const users = await User.find({ 
+      pushToken: { $exists: true, $ne: null, $ne: '' },
+      muteDailyPush: { $ne: true }
+    }).select('_id pushToken language lastDailyPush').lean();
+
+    console.log(`📬 Sending to ${users.length} users (total: ${totalUsers}, parkings: ${parkingsCount})`);
+
+    let sent = 0;
+    for (const u of users) {
+      try {
+        // Pick a random message, but skip community stat messages if numbers are too low
+        let pool = [...motivationalMessages];
+        if (parkingsCount < 3) {
+          pool = pool.filter(m => m.id !== 'today_helped');
+        }
+        if (totalUsers < 10) {
+          pool = pool.filter(m => m.id !== 'community_size');
+        }
+        const msg = pool[Math.floor(Math.random() * pool.length)];
+        const lang = u.language || 'en';
+
+        const title = msg.title[lang] || msg.title.en;
+        let body = msg.body[lang] || msg.body.en;
+        body = body.replace('{totalUsers}', totalUsers).replace('{todayParkings}', parkingsCount);
+
+        await sendPushNotification(u.pushToken, title, body, { type: 'motivational' });
+        sent++;
+
+        // Small delay to avoid rate limiting (Expo recommends max ~600/sec)
+        if (sent % 100 === 0) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      } catch (err) {
+        // Skip individual failures
+      }
+    }
+
+    // Update lastDailyPush for all sent users
+    const userIds = users.map(u => u._id);
+    await User.updateMany({ _id: { $in: userIds } }, { lastDailyPush: now });
+
+    console.log(`📬 Daily push complete: ${sent}/${users.length} sent`);
+  } catch (error) {
+    console.log('📬 Daily push error:', error.message);
+  }
+};
+
+// Check every hour if it is time to send
+setInterval(sendDailyMotivationalPush, 3600000);
+// Also check on startup (in case server restarted at 11 AM)
+setTimeout(sendDailyMotivationalPush, 30000);
+
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -403,6 +554,8 @@ const userSchema = new mongoose.Schema({
   
   // Push notifications
   pushToken: String,
+  muteDailyPush: { type: Boolean, default: false },
+  lastDailyPush: Date,
   
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
@@ -1801,6 +1954,17 @@ app.patch('/api/users/:id/hide-online', async (req, res) => {
   try {
     const { hideOnline } = req.body;
     await User.findByIdAndUpdate(req.params.id, { hideOnline });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Mute/unmute daily motivational push notifications
+app.patch('/api/users/:id/mute-daily-push', async (req, res) => {
+  try {
+    const { muteDailyPush } = req.body;
+    await User.findByIdAndUpdate(req.params.id, { muteDailyPush });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });

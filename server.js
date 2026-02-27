@@ -242,25 +242,64 @@ const motivationalMessages = [
 
 // Daily push cron - checks every hour, sends at 11 AM EST (16:00 UTC)
 let lastDailyPushDate = null;
+let lastEveningPushDate = null;
 
-const sendDailyMotivationalPush = async () => {
+// Evening-specific messages (leaving work, heading home vibes)
+const eveningMessages = [
+  {
+    id: 'heading_home',
+    title: { en: 'Heading home?', ru: 'Едешь домой?', uk: 'Їдеш додому?', es: 'Vas a casa?' },
+    body: { en: 'Someone nearby might need your spot - share it with the brotherhood!', ru: 'Кому-то рядом может понадобиться твое место - поделись с братством!', uk: 'Комусь поруч може знадобитися твоє місце - поділися з братством!', es: 'Alguien cerca puede necesitar tu lugar - compartelo con la hermandad!' }
+  },
+  {
+    id: 'evening_stats',
+    title: { en: 'What a day!', ru: 'Вот это день!', uk: 'Ось це день!', es: 'Que dia!' },
+    body: { en: 'Today the brotherhood helped {todayParkings} drivers find a spot. Be part of it!', ru: 'Сегодня братство помогло {todayParkings} водителям найти место. Будь частью!', uk: 'Сьогодні братство допомогло {todayParkings} водіям знайти місце. Будь частиною!', es: 'Hoy la hermandad ayudo a {todayParkings} conductores. Se parte!' }
+  },
+  {
+    id: 'evening_karma',
+    title: { en: 'Good karma goes around', ru: 'Хорошая карма возвращается', uk: 'Хороша карма повертається', es: 'El buen karma vuelve' },
+    body: { en: 'Share your spot tonight - tomorrow someone will share theirs with you', ru: 'Поделись местом сегодня - завтра кто-то поделится с тобой', uk: 'Поділися місцем сьогодні - завтра хтось поділиться з тобою', es: 'Comparte tu lugar hoy - manana alguien compartira contigo' }
+  },
+  {
+    id: 'evening_rush',
+    title: { en: 'Rush hour parking is tough', ru: 'В час пик парковка - боль', uk: 'В годину пік паркування - біль', es: 'Estacionar en hora pico es dificil' },
+    body: { en: 'Help a fellow driver out - mark your spot when you leave!', ru: 'Помоги другому водителю - отметь свое место когда уезжаешь!', uk: 'Допоможи іншому водію - познач своє місце коли виїжджаєш!', es: 'Ayuda a otro conductor - marca tu lugar cuando te vayas!' }
+  },
+  {
+    id: 'evening_bonus',
+    title: { en: 'Did you grab your daily bonus?', ru: 'Забрал ежедневный бонус?', uk: 'Забрав щоденний бонус?', es: 'Recogiste tu bono diario?' },
+    body: { en: 'Do not miss out - log in before midnight to keep your streak!', ru: 'Не пропусти - зайди до полуночи, чтобы не потерять серию!', uk: 'Не пропусти - зайди до півночі, щоб не втратити серію!', es: 'No te lo pierdas - entra antes de medianoche para mantener tu racha!' }
+  },
+  {
+    id: 'evening_community',
+    title: { en: 'We are {totalUsers} strong!', ru: 'Нас уже {totalUsers}!', uk: 'Нас вже {totalUsers}!', es: 'Ya somos {totalUsers}!' },
+    body: { en: 'The brotherhood keeps growing. Share the app with your driver friends!', ru: 'Братство растет. Расскажи о приложении друзьям-водителям!', uk: 'Братство зростає. Розкажи про додаток друзям-водіям!', es: 'La hermandad crece. Comparte la app con tus amigos conductores!' }
+  }
+];
+
+const sendMotivationalPush = async (timeSlot) => {
   try {
     const now = new Date();
     const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
     const todayStr = now.toISOString().split('T')[0];
 
-    // Only send at 11 AM EST, once per day
-    if (estHour !== 11 || lastDailyPushDate === todayStr) return;
-    lastDailyPushDate = todayStr;
+    // Morning: 11 AM EST | Evening: 5 PM EST
+    if (timeSlot === 'morning') {
+      if (estHour !== 11 || lastDailyPushDate === todayStr) return;
+      lastDailyPushDate = todayStr;
+    } else {
+      if (estHour !== 17 || lastEveningPushDate === todayStr) return;
+      lastEveningPushDate = todayStr;
+    }
 
-    console.log('📬 Starting daily motivational push...');
+    console.log(`📬 Starting ${timeSlot} motivational push...`);
 
     // Gather dynamic stats
     const totalUsers = await User.countDocuments();
     const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
     const todayParkings = await Booking.countDocuments({ completedAt: { $gte: todayStart } });
-    // If no parkings today yet (it is morning), use yesterday
     let parkingsCount = todayParkings;
     if (parkingsCount === 0) {
       const yesterdayStart = new Date(todayStart);
@@ -272,32 +311,33 @@ const sendDailyMotivationalPush = async () => {
     const users = await User.find({ 
       pushToken: { $exists: true, $ne: null, $ne: '' },
       muteDailyPush: { $ne: true }
-    }).select('_id pushToken language lastDailyPush').lean();
+    }).select('_id pushToken language').lean();
 
-    console.log(`📬 Sending to ${users.length} users (total: ${totalUsers}, parkings: ${parkingsCount})`);
+    console.log(`📬 [${timeSlot}] Sending to ${users.length} users (total: ${totalUsers}, parkings: ${parkingsCount})`);
+
+    // Pick message pool based on time of day
+    const pool = timeSlot === 'morning' ? [...motivationalMessages] : [...eveningMessages];
 
     let sent = 0;
     for (const u of users) {
       try {
-        // Pick a random message, but skip community stat messages if numbers are too low
-        let pool = [...motivationalMessages];
+        let filtered = [...pool];
         if (parkingsCount < 3) {
-          pool = pool.filter(m => m.id !== 'today_helped');
+          filtered = filtered.filter(m => m.id !== 'today_helped' && m.id !== 'evening_stats');
         }
         if (totalUsers < 10) {
-          pool = pool.filter(m => m.id !== 'community_size');
+          filtered = filtered.filter(m => m.id !== 'community_size' && m.id !== 'evening_community');
         }
-        const msg = pool[Math.floor(Math.random() * pool.length)];
+        const msg = filtered[Math.floor(Math.random() * filtered.length)];
         const lang = u.language || 'en';
 
-        const title = msg.title[lang] || msg.title.en;
+        const title = (msg.title[lang] || msg.title.en).replace('{totalUsers}', totalUsers);
         let body = msg.body[lang] || msg.body.en;
         body = body.replace('{totalUsers}', totalUsers).replace('{todayParkings}', parkingsCount);
 
         await sendPushNotification(u.pushToken, title, body, { type: 'motivational' });
         sent++;
 
-        // Small delay to avoid rate limiting (Expo recommends max ~600/sec)
         if (sent % 100 === 0) {
           await new Promise(r => setTimeout(r, 1000));
         }
@@ -306,20 +346,25 @@ const sendDailyMotivationalPush = async () => {
       }
     }
 
-    // Update lastDailyPush for all sent users
     const userIds = users.map(u => u._id);
     await User.updateMany({ _id: { $in: userIds } }, { lastDailyPush: now });
 
-    console.log(`📬 Daily push complete: ${sent}/${users.length} sent`);
+    console.log(`📬 [${timeSlot}] Push complete: ${sent}/${users.length} sent`);
   } catch (error) {
-    console.log('📬 Daily push error:', error.message);
+    console.log(`📬 [${timeSlot}] Push error:`, error.message);
   }
 };
 
-// Check every hour if it is time to send
-setInterval(sendDailyMotivationalPush, 3600000);
-// Also check on startup (in case server restarted at 11 AM)
-setTimeout(sendDailyMotivationalPush, 30000);
+// Check every 30 min if it is time to send (morning 11 AM, evening 5 PM EST)
+setInterval(() => {
+  sendMotivationalPush('morning');
+  sendMotivationalPush('evening');
+}, 1800000);
+// Also check on startup
+setTimeout(() => {
+  sendMotivationalPush('morning');
+  sendMotivationalPush('evening');
+}, 30000);
 
 const app = express();
 const httpServer = http.createServer(app);

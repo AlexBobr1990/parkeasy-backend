@@ -1974,9 +1974,9 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
       groupMessages += unread;
     }
     
-    res.json({ count, friendRequests, convoyInvites, convoyMessages, groupMessages });
+    res.json({ count, friendRequests, convoyInvites, convoyMessages, groupMessages, groupChatMessages: groupMessages });
   } catch (error) {
-    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0, groupMessages: 0 });
+    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0, groupMessages: 0, groupChatMessages: 0 });
   }
 });
 
@@ -4540,13 +4540,40 @@ app.post('/api/group-chats', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Name and members required' });
     }
     const allMembers = [creatorId, ...memberIds.filter(id => id !== creatorId)];
-    const chat = new GroupChat({ name, creatorId, members: allMembers });
+    
+    const creator = await User.findById(creatorId).select('name').lean();
+    const creatorName = creator?.name || 'User';
+    
+    // Add system welcome message so unread count picks it up
+    const systemMessage = {
+      fromUserId: creatorId,
+      senderName: creatorName,
+      text: `${creatorName} created the group`,
+      createdAt: new Date()
+    };
+    
+    const chat = new GroupChat({ name, creatorId, members: allMembers, messages: [systemMessage] });
     await chat.save();
     
-    // Notify members via WS
-    allMembers.forEach(uid => {
-      if (uid !== creatorId) emitToUser(uid, 'groupChat:created', { chatId: chat._id.toString(), name });
-    });
+    // Mark as read for creator only
+    chat.readBy = [{ userId: creatorId, readAt: new Date() }];
+    await chat.save();
+    
+    // Notify members via WS + Push
+    const invitedMembers = await User.find({ 
+      _id: { $in: allMembers.filter(id => id !== creatorId) } 
+    }).select('pushToken language').lean();
+    
+    for (const member of invitedMembers) {
+      emitToUser(member._id.toString(), 'groupChat:created', { chatId: chat._id.toString(), name });
+      
+      if (member.pushToken) {
+        const lang = member.language || 'en';
+        const titles = { en: 'New group chat', ru: 'Новый групповой чат', uk: 'Новий груповий чат', es: 'Nuevo chat grupal' };
+        const bodies = { en: `${creatorName} added you to "${name}"`, ru: `${creatorName} добавил вас в "${name}"`, uk: `${creatorName} додав вас до "${name}"`, es: `${creatorName} te agregó a "${name}"` };
+        sendPushNotification(member.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'group_created', chatId: chat._id.toString() });
+      }
+    }
     
     res.json({ success: true, chat });
   } catch (error) {

@@ -824,6 +824,29 @@ const aspSuspensionSchema = new mongoose.Schema({
 aspSuspensionSchema.index({ date: 1 });
 const ASPSuspension = mongoose.model('ASPSuspension', aspSuspensionSchema);
 
+// ==================== GROUP CHAT SCHEMA ====================
+const groupChatSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  creatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  messages: [{
+    fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    senderName: String,
+    senderAvatar: String,
+    text: String,
+    image: String,
+    deletedFor: [{ type: mongoose.Schema.Types.ObjectId }],
+    deletedForAll: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  readBy: [{
+    userId: { type: mongoose.Schema.Types.ObjectId },
+    readAt: { type: Date, default: Date.now }
+  }],
+  createdAt: { type: Date, default: Date.now }
+});
+const GroupChat = mongoose.model('GroupChat', groupChatSchema);
+
 // Кэш для AppSettings
 let cachedAppSettings = null;
 let appSettingsCacheTime = 0;
@@ -4483,6 +4506,206 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     res.json({ success: true, accepted });
   } catch (error) {
     console.log("WAIT RESPONSE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// ==================== GROUP CHATS ====================
+
+// Create group chat
+app.post('/api/group-chats', async (req, res) => {
+  try {
+    const { creatorId, name, memberIds } = req.body;
+    if (!creatorId || !name || !memberIds || memberIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Name and members required' });
+    }
+    const allMembers = [creatorId, ...memberIds.filter(id => id !== creatorId)];
+    const chat = new GroupChat({ name, creatorId, members: allMembers });
+    await chat.save();
+    
+    // Notify members via WS
+    allMembers.forEach(uid => {
+      if (uid !== creatorId) emitToUser(uid, 'group:created', { chatId: chat._id.toString(), name });
+    });
+    
+    res.json({ success: true, chat });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get user's group chats
+app.get('/api/group-chats/:userId', async (req, res) => {
+  try {
+    const chats = await GroupChat.find({ members: req.params.userId })
+      .populate('members', 'name avatar avatarThumb')
+      .sort({ 'messages.createdAt': -1, createdAt: -1 })
+      .lean();
+    
+    const result = chats.map(chat => {
+      const lastMsg = chat.messages?.filter(m => !m.deletedForAll).slice(-1)[0] || null;
+      const readEntry = chat.readBy?.find(r => r.userId?.toString() === req.params.userId);
+      const readAt = readEntry?.readAt || new Date(0);
+      const unread = chat.messages?.filter(m => 
+        !m.deletedForAll && 
+        m.fromUserId?.toString() !== req.params.userId && 
+        new Date(m.createdAt) > new Date(readAt)
+      ).length || 0;
+      return { ...chat, lastMessage: lastMsg, unreadCount: unread, messages: undefined };
+    });
+    
+    res.json(result);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Get group messages
+app.get('/api/group-chats/:chatId/messages/:userId', async (req, res) => {
+  try {
+    const chat = await GroupChat.findById(req.params.chatId).lean();
+    if (!chat) return res.json([]);
+    const messages = (chat.messages || []).filter(m => 
+      !m.deletedForAll && !(m.deletedFor || []).some(id => id.toString() === req.params.userId)
+    );
+    res.json(messages);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Send group message
+app.post('/api/group-chats/:chatId/message', async (req, res) => {
+  try {
+    const { fromUserId, text, imageBase64 } = req.body;
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    const sender = await User.findById(fromUserId).select('name avatar avatarThumb').lean();
+    
+    let image = null;
+    if (imageBase64) {
+      image = await uploadToCloudinary(imageBase64, fromUserId);
+    }
+    
+    const message = {
+      fromUserId,
+      senderName: sender?.name || 'User',
+      senderAvatar: sender?.avatarThumb || sender?.avatar || null,
+      text: text || '',
+      image,
+      createdAt: new Date()
+    };
+    
+    chat.messages.push(message);
+    await chat.save();
+    
+    const lastMsg = chat.messages[chat.messages.length - 1];
+    
+    // WS notify all members
+    chat.members.forEach(uid => {
+      if (uid.toString() !== fromUserId) {
+        emitToUser(uid, 'group:message', { chatId: chat._id.toString(), message: lastMsg });
+      }
+    });
+    
+    // Push to members
+    const members = await User.find({ _id: { $in: chat.members.filter(id => id.toString() !== fromUserId) } })
+      .select('pushToken language').lean();
+    members.forEach(m => {
+      if (m.pushToken) {
+        sendPushNotification(m.pushToken, 
+          `${chat.name}`, 
+          `${sender?.name || 'User'}: ${text || '📷'}`,
+          { type: 'group_message', chatId: chat._id.toString() });
+      }
+    });
+    
+    res.json({ success: true, message: lastMsg });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Mark group messages read
+app.post('/api/group-chats/:chatId/read', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    const existing = chat.readBy.find(r => r.userId?.toString() === userId);
+    if (existing) {
+      existing.readAt = new Date();
+    } else {
+      chat.readBy.push({ userId, readAt: new Date() });
+    }
+    await chat.save();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Delete group message
+app.delete('/api/group-chats/message/:messageId', async (req, res) => {
+  try {
+    const { userId, forAll } = req.body;
+    const chat = await GroupChat.findOne({ 'messages._id': req.params.messageId });
+    if (!chat) return res.status(404).json({ success: false });
+    
+    const msg = chat.messages.id(req.params.messageId);
+    if (!msg) return res.status(404).json({ success: false });
+    
+    if (forAll && msg.fromUserId?.toString() === userId) {
+      msg.deletedForAll = true;
+    } else {
+      if (!msg.deletedFor) msg.deletedFor = [];
+      msg.deletedFor.push(userId);
+    }
+    await chat.save();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Add members to group
+app.patch('/api/group-chats/:chatId/members', async (req, res) => {
+  try {
+    const { memberIds } = req.body;
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    memberIds.forEach(id => {
+      if (!chat.members.some(m => m.toString() === id)) {
+        chat.members.push(id);
+      }
+    });
+    await chat.save();
+    res.json({ success: true, chat });
+  } catch (error) {
+    res.status(500).json({ success: false });
+  }
+});
+
+// Leave group chat
+app.post('/api/group-chats/:chatId/leave', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    chat.members = chat.members.filter(m => m.toString() !== userId);
+    
+    // If no members left, delete the chat
+    if (chat.members.length === 0) {
+      await GroupChat.findByIdAndDelete(req.params.chatId);
+    } else {
+      await chat.save();
+    }
+    res.json({ success: true });
+  } catch (error) {
     res.status(500).json({ success: false });
   }
 });

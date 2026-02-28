@@ -57,6 +57,22 @@ function getCloudinaryThumb(cloudinaryUrl, size = 80) {
   return cloudinaryUrl.replace('/upload/', `/upload/w_${size},h_${size},c_fill,q_auto,f_auto/`);
 }
 
+async function uploadChatImage(base64Image) {
+  try {
+    if (!base64Image) return null;
+    if (base64Image.startsWith('https://res.cloudinary.com')) return base64Image;
+    if (!base64Image.startsWith('data:image')) return null;
+    const result = await cloudinary.uploader.upload(base64Image, {
+      folder: 'parkbro/chat',
+      transformation: [{ width: 800, height: 800, crop: 'limit', quality: 'auto' }]
+    });
+    return result.secure_url;
+  } catch (error) {
+    console.log('Chat image upload error:', error.message);
+    return null;
+  }
+}
+
 // ==================== RATE LIMITER ====================
 const rateLimitStore = {};
 function rateLimit(key, maxRequests, windowMs) {
@@ -170,202 +186,6 @@ const getPushText = (type, field, lang, vars = {}) => {
   return Object.entries(vars).reduce((t, [k, v]) => t.replace(`{${k}}`, v), text);
 };
 
-// ==================== MOTIVATIONAL DAILY PUSH ====================
-
-const motivationalMessages = [
-  // Category 1: Daily bonus / Streak
-  {
-    id: 'daily_bonus',
-    title: { en: 'Your daily bonus awaits!', ru: 'Твой ежедневный бонус ждет!', uk: 'Твій щоденний бонус чекає!', es: 'Tu bono diario te espera!' },
-    body: { en: 'Log in and collect your reward - keep the streak going!', ru: 'Зайди и забери награду - не ломай серию!', uk: 'Зайди і забери нагороду - не ламай серію!', es: 'Entra y recoge tu premio - no rompas la racha!' }
-  },
-  {
-    id: 'streak_remind',
-    title: { en: 'Keep your streak alive!', ru: 'Не потеряй серию!', uk: 'Не втрать серію!', es: 'No pierdas tu racha!' },
-    body: { en: 'Your daily tasks are ready. Complete them for bonus points!', ru: 'Ежедневные задания готовы. Выполни их ради бонусных баллов!', uk: 'Щоденні завдання готові. Виконай їх заради бонусних балів!', es: 'Tus tareas diarias estan listas. Completalas por puntos extra!' }
-  },
-  // Category 2: Community stats (dynamic - {totalUsers}, {todayParkings})
-  {
-    id: 'community_size',
-    title: { en: 'The brotherhood grows!', ru: 'Братство растет!', uk: 'Братство зростає!', es: 'La hermandad crece!' },
-    body: { en: 'We are already {totalUsers} drivers strong. Together we find parking faster!', ru: 'Нас уже {totalUsers}! Вместе мы находим парковку быстрее!', uk: 'Нас вже {totalUsers}! Разом ми знаходимо паркування швидше!', es: 'Ya somos {totalUsers} conductores. Juntos encontramos parking mas rapido!' }
-  },
-  {
-    id: 'today_helped',
-    title: { en: 'Brotherhood in action!', ru: 'Братство в действии!', uk: 'Братство в дії!', es: 'Hermandad en accion!' },
-    body: { en: 'Today our community helped {todayParkings} drivers find parking!', ru: 'Сегодня братство помогло {todayParkings} водителям найти парковку!', uk: 'Сьогодні братство допомогло {todayParkings} водіям знайти паркування!', es: 'Hoy la hermandad ayudo a {todayParkings} conductores a encontrar parking!' }
-  },
-  // Category 3: Motivational / Brotherhood philosophy
-  {
-    id: 'karma',
-    title: { en: 'Share the spot, grow the karma', ru: 'Поделись местом - прокачай карму', uk: 'Поділись місцем - прокачай карму', es: 'Comparte el lugar, crece el karma' },
-    body: { en: 'The more you help the community, the more it helps you back!', ru: 'Чем больше ты помогаешь сообществу, тем больше оно поможет тебе!', uk: 'Чим більше ти допомагаєш спільноті, тим більше вона допоможе тобі!', es: 'Cuanto mas ayudas a la comunidad, mas te ayudara a ti!' }
-  },
-  {
-    id: 'brotherhood_spirit',
-    title: { en: 'You are part of something bigger', ru: 'Ты часть чего-то большего', uk: 'Ти частина чогось більшого', es: 'Eres parte de algo mas grande' },
-    body: { en: 'Every shared spot makes NYC a little easier for all of us', ru: 'Каждое отданное место делает Нью-Йорк чуть проще для всех нас', uk: 'Кожне віддане місце робить Нью-Йорк трохи простішим для всіх нас', es: 'Cada lugar compartido hace Nueva York un poco mas facil para todos' }
-  },
-  {
-    id: 'every_spot_counts',
-    title: { en: 'Every spot counts!', ru: 'Каждое место на счету!', uk: 'Кожне місце на рахунку!', es: 'Cada lugar cuenta!' },
-    body: { en: 'Leaving a spot? Share it with the brotherhood - someone nearby is looking!', ru: 'Уезжаешь? Поделись местом - кто-то рядом ищет!', uk: 'Виїжджаєш? Поділися місцем - хтось поруч шукає!', es: 'Te vas? Comparte tu lugar - alguien cerca esta buscando!' }
-  },
-  // Category 4: Engagement nudge
-  {
-    id: 'check_tasks',
-    title: { en: 'New day, new tasks!', ru: 'Новый день - новые задания!', uk: 'Новий день - нові завдання!', es: 'Nuevo dia, nuevas tareas!' },
-    body: { en: 'Complete daily tasks and climb the leaderboard', ru: 'Выполняй ежедневные задания и поднимайся в рейтинге', uk: 'Виконуй щоденні завдання і піднімайся в рейтингу', es: 'Completa tareas diarias y sube en el ranking' }
-  },
-  {
-    id: 'level_up_nudge',
-    title: { en: 'Level up is closer than you think!', ru: 'Новый уровень ближе, чем ты думаешь!', uk: 'Новий рівень ближче, ніж ти думаєш!', es: 'Subir de nivel esta mas cerca de lo que piensas!' },
-    body: { en: 'Share a spot today and earn points toward your next level', ru: 'Поделись местом сегодня и заработай баллы для нового уровня', uk: 'Поділися місцем сьогодні і заробляй бали для нового рівня', es: 'Comparte un lugar hoy y gana puntos para tu proximo nivel' }
-  },
-  // Category 5: Feature awareness
-  {
-    id: 'sos_reminder',
-    title: { en: 'Flat tire? Dead battery?', ru: 'Спустило колесо? Сел аккумулятор?', uk: 'Спустило колесо? Сів акумулятор?', es: 'Llanta ponchada? Bateria muerta?' },
-    body: { en: 'The brotherhood has your back - use SOS and a bro will come help!', ru: 'Братство поможет - нажми SOS и бро приедет на помощь!', uk: 'Братство допоможе - натисни SOS і бро приїде на допомогу!', es: 'La hermandad te apoya - usa SOS y un bro vendra a ayudar!' }
-  },
-  {
-    id: 'convoy_reminder',
-    title: { en: 'Road trip with friends?', ru: 'Едешь с друзьями?', uk: 'Їдеш з друзями?', es: 'Viaje con amigos?' },
-    body: { en: 'Try Convoy mode - see your friends on the map in real time!', ru: 'Попробуй режим Конвой - видь друзей на карте в реальном времени!', uk: 'Спробуй режим Конвой - бач друзів на мапі в реальному часі!', es: 'Prueba el modo Convoy - ve a tus amigos en el mapa en tiempo real!' }
-  },
-  {
-    id: 'towed_car_tip',
-    title: { en: 'Got towed? Do not panic', ru: 'Эвакуировали? Не паникуй', uk: 'Евакуювали? Не панікуй', es: 'Te remolcaron? No te asustes' },
-    body: { en: 'ParkBro helps you find your car, know your rights and calculate costs', ru: 'ParkBro поможет найти машину, знать свои права и рассчитать расходы', uk: 'ParkBro допоможе знайти машину, знати свої права і розрахувати витрати', es: 'ParkBro te ayuda a encontrar tu auto, conocer tus derechos y calcular costos' }
-  }
-];
-
-// Daily push cron - checks every hour, sends at 11 AM EST (16:00 UTC)
-let lastDailyPushDate = null;
-let lastEveningPushDate = null;
-
-// Evening-specific messages (leaving work, heading home vibes)
-const eveningMessages = [
-  {
-    id: 'heading_home',
-    title: { en: 'Heading home?', ru: 'Едешь домой?', uk: 'Їдеш додому?', es: 'Vas a casa?' },
-    body: { en: 'Someone nearby might need your spot - share it with the brotherhood!', ru: 'Кому-то рядом может понадобиться твое место - поделись с братством!', uk: 'Комусь поруч може знадобитися твоє місце - поділися з братством!', es: 'Alguien cerca puede necesitar tu lugar - compartelo con la hermandad!' }
-  },
-  {
-    id: 'evening_stats',
-    title: { en: 'What a day!', ru: 'Вот это день!', uk: 'Ось це день!', es: 'Que dia!' },
-    body: { en: 'Today the brotherhood helped {todayParkings} drivers find a spot. Be part of it!', ru: 'Сегодня братство помогло {todayParkings} водителям найти место. Будь частью!', uk: 'Сьогодні братство допомогло {todayParkings} водіям знайти місце. Будь частиною!', es: 'Hoy la hermandad ayudo a {todayParkings} conductores. Se parte!' }
-  },
-  {
-    id: 'evening_karma',
-    title: { en: 'Good karma goes around', ru: 'Хорошая карма возвращается', uk: 'Хороша карма повертається', es: 'El buen karma vuelve' },
-    body: { en: 'Share your spot tonight - tomorrow someone will share theirs with you', ru: 'Поделись местом сегодня - завтра кто-то поделится с тобой', uk: 'Поділися місцем сьогодні - завтра хтось поділиться з тобою', es: 'Comparte tu lugar hoy - manana alguien compartira contigo' }
-  },
-  {
-    id: 'evening_rush',
-    title: { en: 'Rush hour parking is tough', ru: 'В час пик парковка - боль', uk: 'В годину пік паркування - біль', es: 'Estacionar en hora pico es dificil' },
-    body: { en: 'Help a fellow driver out - mark your spot when you leave!', ru: 'Помоги другому водителю - отметь свое место когда уезжаешь!', uk: 'Допоможи іншому водію - познач своє місце коли виїжджаєш!', es: 'Ayuda a otro conductor - marca tu lugar cuando te vayas!' }
-  },
-  {
-    id: 'evening_bonus',
-    title: { en: 'Did you grab your daily bonus?', ru: 'Забрал ежедневный бонус?', uk: 'Забрав щоденний бонус?', es: 'Recogiste tu bono diario?' },
-    body: { en: 'Do not miss out - log in before midnight to keep your streak!', ru: 'Не пропусти - зайди до полуночи, чтобы не потерять серию!', uk: 'Не пропусти - зайди до півночі, щоб не втратити серію!', es: 'No te lo pierdas - entra antes de medianoche para mantener tu racha!' }
-  },
-  {
-    id: 'evening_community',
-    title: { en: 'We are {totalUsers} strong!', ru: 'Нас уже {totalUsers}!', uk: 'Нас вже {totalUsers}!', es: 'Ya somos {totalUsers}!' },
-    body: { en: 'The brotherhood keeps growing. Share the app with your driver friends!', ru: 'Братство растет. Расскажи о приложении друзьям-водителям!', uk: 'Братство зростає. Розкажи про додаток друзям-водіям!', es: 'La hermandad crece. Comparte la app con tus amigos conductores!' }
-  }
-];
-
-const sendMotivationalPush = async (timeSlot) => {
-  try {
-    const now = new Date();
-    const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
-    const todayStr = now.toISOString().split('T')[0];
-
-    // Morning: 11 AM EST | Evening: 5 PM EST
-    if (timeSlot === 'morning') {
-      if (estHour !== 11 || lastDailyPushDate === todayStr) return;
-      lastDailyPushDate = todayStr;
-    } else {
-      if (estHour !== 17 || lastEveningPushDate === todayStr) return;
-      lastEveningPushDate = todayStr;
-    }
-
-    console.log(`📬 Starting ${timeSlot} motivational push...`);
-
-    // Gather dynamic stats
-    const totalUsers = await User.countDocuments();
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const todayParkings = await Booking.countDocuments({ completedAt: { $gte: todayStart } });
-    let parkingsCount = todayParkings;
-    if (parkingsCount === 0) {
-      const yesterdayStart = new Date(todayStart);
-      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-      parkingsCount = await Booking.countDocuments({ completedAt: { $gte: yesterdayStart, $lt: todayStart } });
-    }
-
-    // Get all users with push tokens who haven't muted
-    const users = await User.find({ 
-      pushToken: { $exists: true, $ne: null, $ne: '' },
-      muteDailyPush: { $ne: true }
-    }).select('_id pushToken language').lean();
-
-    console.log(`📬 [${timeSlot}] Sending to ${users.length} users (total: ${totalUsers}, parkings: ${parkingsCount})`);
-
-    // Pick message pool based on time of day
-    const pool = timeSlot === 'morning' ? [...motivationalMessages] : [...eveningMessages];
-
-    let sent = 0;
-    for (const u of users) {
-      try {
-        let filtered = [...pool];
-        if (parkingsCount < 3) {
-          filtered = filtered.filter(m => m.id !== 'today_helped' && m.id !== 'evening_stats');
-        }
-        if (totalUsers < 10) {
-          filtered = filtered.filter(m => m.id !== 'community_size' && m.id !== 'evening_community');
-        }
-        const msg = filtered[Math.floor(Math.random() * filtered.length)];
-        const lang = u.language || 'en';
-
-        const title = (msg.title[lang] || msg.title.en).replace('{totalUsers}', totalUsers);
-        let body = msg.body[lang] || msg.body.en;
-        body = body.replace('{totalUsers}', totalUsers).replace('{todayParkings}', parkingsCount);
-
-        await sendPushNotification(u.pushToken, title, body, { type: 'motivational' });
-        sent++;
-
-        if (sent % 100 === 0) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      } catch (err) {
-        // Skip individual failures
-      }
-    }
-
-    const userIds = users.map(u => u._id);
-    await User.updateMany({ _id: { $in: userIds } }, { lastDailyPush: now });
-
-    console.log(`📬 [${timeSlot}] Push complete: ${sent}/${users.length} sent`);
-  } catch (error) {
-    console.log(`📬 [${timeSlot}] Push error:`, error.message);
-  }
-};
-
-// Check every 30 min if it is time to send (morning 11 AM, evening 5 PM EST)
-setInterval(() => {
-  sendMotivationalPush('morning');
-  sendMotivationalPush('evening');
-}, 1800000);
-// Also check on startup
-setTimeout(() => {
-  sendMotivationalPush('morning');
-  sendMotivationalPush('evening');
-}, 30000);
-
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -408,6 +228,14 @@ io.on('connection', (socket) => {
   
   socket.on('leave:friendchat', (friendId) => {
     socket.leave(`friendchat:${userId}:${friendId}`);
+  });
+
+  // Групповые чаты
+  socket.on('join:groupchat', (chatId) => {
+    if (chatId) socket.join(`groupchat:${chatId}`);
+  });
+  socket.on('leave:groupchat', (chatId) => {
+    if (chatId) socket.leave(`groupchat:${chatId}`);
   });
 
   // Клиент подписывается на комнату каравана
@@ -599,8 +427,6 @@ const userSchema = new mongoose.Schema({
   
   // Push notifications
   pushToken: String,
-  muteDailyPush: { type: Boolean, default: false },
-  lastDailyPush: Date,
   
   lastActivity: { type: Date, default: Date.now },
   lastLocation: { lat: Number, lng: Number },
@@ -721,8 +547,11 @@ const Rating = mongoose.model('Rating', ratingSchema);
 const friendMessageSchema = new mongoose.Schema({
   fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  text: { type: String, required: true },
+  text: { type: String, default: '' },
+  image: { type: String, default: '' },
   read: { type: Boolean, default: false },
+  deletedFor: [{ type: mongoose.Schema.Types.ObjectId }],
+  deletedForAll: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -737,6 +566,32 @@ const parkingRequestSchema = new mongoose.Schema({
 });
 
 const FriendMessage = mongoose.model('FriendMessage', friendMessageSchema);
+
+// ==================== GROUP CHATS ====================
+const groupChatSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  avatar: { type: String, default: '' },
+  creatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  members: [{ 
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    joinedAt: { type: Date, default: Date.now }
+  }],
+  createdAt: { type: Date, default: Date.now }
+});
+
+const groupMessageSchema = new mongoose.Schema({
+  chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'GroupChat', required: true },
+  fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  text: { type: String, default: '' },
+  image: { type: String, default: '' },
+  readBy: [{ type: mongoose.Schema.Types.ObjectId }],
+  deletedFor: [{ type: mongoose.Schema.Types.ObjectId }],
+  deletedForAll: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const GroupChat = mongoose.model('GroupChat', groupChatSchema);
+const GroupMessage = mongoose.model('GroupMessage', groupMessageSchema);
 const ParkingRequest = mongoose.model('ParkingRequest', parkingRequestSchema);
 
 // Дружба между пользователями (помимо рефералов)
@@ -1106,6 +961,11 @@ async function createIndexes() {
     // Daily progress
     await UserDailyProgress.collection.createIndex({ userId: 1, date: 1 });
     await UserStreak.collection.createIndex({ userId: 1 });
+    
+    // Group chats
+    await GroupChat.collection.createIndex({ 'members.userId': 1 });
+    await GroupMessage.collection.createIndex({ chatId: 1, createdAt: 1 });
+    await GroupMessage.collection.createIndex({ chatId: 1, readBy: 1 });
     
     console.log('✅ Индексы созданы');
   } catch (error) {
@@ -1605,7 +1465,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
     
     // Один агрегатный запрос вместо N
     const unreadCounts = await FriendMessage.aggregate([
-      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false } },
+      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false, deletedForAll: { $ne: true }, deletedFor: { $ne: new mongoose.Types.ObjectId(userId) } } },
       { $group: { _id: '$fromUserId', count: { $sum: 1 } } }
     ]);
     const unreadMap = {};
@@ -1745,7 +1605,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
     // Непрочитанные сообщения - один агрегатный запрос
     const allFriendIds = allFriendsRaw.map(f => f.user._id);
     const unreadCounts = await FriendMessage.aggregate([
-      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false } },
+      { $match: { fromUserId: { $in: allFriendIds }, toUserId: new mongoose.Types.ObjectId(userId), read: false, deletedForAll: { $ne: true }, deletedFor: { $ne: new mongoose.Types.ObjectId(userId) } } },
       { $group: { _id: '$fromUserId', count: { $sum: 1 } } }
     ]);
     const unreadMap = {};
@@ -1837,7 +1697,11 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
 // Отправить сообщение другу
 app.post('/api/friends/message', async (req, res) => {
   try {
-    const { fromUserId, toUserId, text } = req.body;
+    const { fromUserId, toUserId, text, imageBase64 } = req.body;
+    
+    if (!text && !imageBase64) {
+      return res.status(400).json({ success: false, message: 'No content' });
+    }
     
     // Проверяем что они друзья
     const friendship = await Friendship.findOne({
@@ -1862,15 +1726,23 @@ app.post('/api/friends/message', async (req, res) => {
       return res.status(403).json({ success: false, message: 'User is blocked' });
     }
     
-    const message = new FriendMessage({ fromUserId, toUserId, text });
+    // Загружаем картинку в Cloudinary если есть
+    let imageUrl = '';
+    if (imageBase64) {
+      imageUrl = await uploadChatImage(imageBase64);
+      if (!imageUrl && !text) {
+        return res.status(400).json({ success: false, message: 'Image upload failed' });
+      }
+    }
+    
+    const message = new FriendMessage({ fromUserId, toUserId, text: text || '', image: imageUrl });
     await message.save();
     
-    // 🔌 WebSocket: новое сообщение другу
+    // WebSocket: новое сообщение другу
     emitToUser(toUserId, 'friendMessage:new', { 
       message: message.toObject(), 
       fromUserId 
     });
-    // Также в комнату чата если получатель в ней
     io.to(`friendchat:${toUserId}:${fromUserId}`).emit('friendMessage:new', { 
       message: message.toObject(), 
       fromUserId 
@@ -1882,7 +1754,6 @@ app.post('/api/friends/message', async (req, res) => {
       mutedUserId: fromUserId
     });
     
-    // Отправляем push уведомление только если не заглушен
     if (!muted) {
       const recipient = await User.findById(toUserId);
       const sender = await User.findById(fromUserId);
@@ -1895,14 +1766,11 @@ app.post('/api/friends/message', async (req, res) => {
           es: '💬 Nuevo mensaje',
           uk: '💬 Нове повідомлення'
         };
-        const bodies = {
-          en: `${sender?.name || 'Friend'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          ru: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          es: `${sender?.name || 'Amigo'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          uk: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`
-        };
+        const preview = imageUrl && !text
+          ? { en: `${sender?.name || 'Friend'} sent a photo`, ru: `${sender?.name || 'Друг'} отправил фото`, es: `${sender?.name || 'Amigo'} envio una foto`, uk: `${sender?.name || 'Друг'} надіслав фото` }
+          : { en: `${sender?.name || 'Friend'}: ${(text||'').substring(0, 50)}`, ru: `${sender?.name || 'Друг'}: ${(text||'').substring(0, 50)}`, es: `${sender?.name || 'Amigo'}: ${(text||'').substring(0, 50)}`, uk: `${sender?.name || 'Друг'}: ${(text||'').substring(0, 50)}` };
         
-        sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        sendPushNotification(recipient.pushToken, titles[lang] || titles.en, preview[lang] || preview.en, {
           type: 'friend_message',
           fromUserId: fromUserId.toString()
         });
@@ -1925,10 +1793,19 @@ app.get('/api/friends/messages/:friendId/:userId', async (req, res) => {
       $or: [
         { fromUserId: userId, toUserId: friendId },
         { fromUserId: friendId, toUserId: userId }
-      ]
-    }).sort({ createdAt: 1 }).limit(100);
+      ],
+      deletedFor: { $ne: userId }
+    }).sort({ createdAt: 1 }).limit(100).lean();
     
-    res.json(messages);
+    // Маскируем контент удаленных для всех
+    const result = messages.map(m => {
+      if (m.deletedForAll) {
+        return { ...m, text: '', image: '', _deleted: true };
+      }
+      return m;
+    });
+    
+    res.json(result);
   } catch (error) {
     console.log("GET FRIEND MESSAGES ERROR:", error);
     res.json([]);
@@ -1952,6 +1829,300 @@ app.post('/api/friends/mark-read', async (req, res) => {
   }
 });
 
+// Удалить сообщение друга
+app.delete('/api/friends/message/:messageId', async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { userId, forAll } = req.body;
+    
+    const message = await FriendMessage.findById(messageId);
+    if (!message) return res.status(404).json({ success: false });
+    
+    if (forAll) {
+      // Только автор может удалить у всех
+      if (message.fromUserId.toString() !== userId) {
+        return res.status(403).json({ success: false, message: 'Only sender can delete for all' });
+      }
+      message.deletedForAll = true;
+      message.text = '';
+      message.image = '';
+      await message.save();
+      
+      // Уведомляем собеседника через WS
+      const otherId = message.fromUserId.toString() === userId ? message.toUserId : message.fromUserId;
+      emitToUser(otherId.toString(), 'friendMessage:deleted', { messageId, forAll: true });
+      io.to(`friendchat:${otherId}:${userId}`).emit('friendMessage:deleted', { messageId, forAll: true });
+    } else {
+      // Удалить только у себя
+      await FriendMessage.updateOne(
+        { _id: messageId },
+        { $addToSet: { deletedFor: userId } }
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("DELETE FRIEND MESSAGE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// ==================== GROUP CHATS ====================
+
+// Создать групповой чат
+app.post('/api/group-chats', async (req, res) => {
+  try {
+    const { creatorId, name, memberIds } = req.body;
+    // memberIds = массив ID друзей (creatorId включается автоматически)
+    const allMemberIds = [creatorId, ...memberIds.filter(id => id !== creatorId)];
+    
+    const chat = new GroupChat({
+      name,
+      creatorId,
+      members: allMemberIds.map(id => ({ userId: id }))
+    });
+    await chat.save();
+    
+    // Уведомляем всех участников через WS
+    for (const id of memberIds) {
+      if (id !== creatorId) {
+        emitToUser(id, 'groupChat:created', { chatId: chat._id.toString(), name });
+      }
+    }
+    
+    // Push участникам
+    const creator = await User.findById(creatorId).select('name').lean();
+    for (const id of memberIds) {
+      if (id === creatorId) continue;
+      const member = await User.findById(id).select('pushToken language').lean();
+      if (member?.pushToken) {
+        const lang = member.language || 'en';
+        const titles = { en: '👥 New group chat', ru: '👥 Новый групповой чат', es: '👥 Nuevo chat grupal', uk: '👥 Новий груповий чат' };
+        const bodies = { en: `${creator?.name} added you to "${name}"`, ru: `${creator?.name} добавил вас в "${name}"`, es: `${creator?.name} te agrego a "${name}"`, uk: `${creator?.name} додав вас до "${name}"` };
+        sendPushNotification(member.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, { type: 'group_chat', chatId: chat._id.toString() });
+      }
+    }
+    
+    res.json({ success: true, chat });
+  } catch (error) {
+    console.log("CREATE GROUP CHAT ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Список групповых чатов пользователя
+app.get('/api/group-chats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const chats = await GroupChat.find({
+      'members.userId': userId
+    }).sort({ createdAt: -1 }).lean();
+    
+    // Добавляем lastMessage и unreadCount для каждого чата
+    const result = [];
+    for (const chat of chats) {
+      const lastMsg = await GroupMessage.findOne({ chatId: chat._id, deletedForAll: { $ne: true }, deletedFor: { $ne: userId } })
+        .sort({ createdAt: -1 }).lean();
+      const unread = await GroupMessage.countDocuments({
+        chatId: chat._id,
+        fromUserId: { $ne: userId },
+        readBy: { $ne: userId },
+        deletedFor: { $ne: userId },
+        deletedForAll: { $ne: true }
+      });
+      
+      // Подгружаем имена и аватары участников
+      const memberIds = chat.members.map(m => m.userId);
+      const users = await User.find({ _id: { $in: memberIds } }).select('name avatar').lean();
+      const membersInfo = users.map(u => ({ _id: u._id, name: u.name, avatar: u.avatar }));
+      
+      result.push({ ...chat, lastMessage: lastMsg || null, unreadCount: unread, membersInfo });
+    }
+    
+    res.json(result);
+  } catch (error) {
+    console.log("GET GROUP CHATS ERROR:", error);
+    res.json([]);
+  }
+});
+
+// Получить сообщения группового чата
+app.get('/api/group-chats/:chatId/messages/:userId', async (req, res) => {
+  try {
+    const { chatId, userId } = req.params;
+    
+    const messages = await GroupMessage.find({
+      chatId,
+      deletedFor: { $ne: userId }
+    }).sort({ createdAt: 1 }).limit(200).lean();
+    
+    const result = messages.map(m => {
+      if (m.deletedForAll) return { ...m, text: '', image: '', _deleted: true };
+      return m;
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.log("GET GROUP MESSAGES ERROR:", error);
+    res.json([]);
+  }
+});
+
+// Отправить сообщение в групповой чат
+app.post('/api/group-chats/:chatId/message', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { fromUserId, text, imageBase64 } = req.body;
+    
+    if (!text && !imageBase64) return res.status(400).json({ success: false });
+    
+    const chat = await GroupChat.findById(chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    const isMember = chat.members.some(m => m.userId.toString() === fromUserId);
+    if (!isMember) return res.status(403).json({ success: false, message: 'Not a member' });
+    
+    let imageUrl = '';
+    if (imageBase64) {
+      imageUrl = await uploadChatImage(imageBase64);
+      if (!imageUrl && !text) return res.status(400).json({ success: false, message: 'Image upload failed' });
+    }
+    
+    const message = new GroupMessage({
+      chatId, fromUserId, text: text || '', image: imageUrl, readBy: [fromUserId]
+    });
+    await message.save();
+    
+    // WS в комнату чата
+    io.to(`groupchat:${chatId}`).emit('groupMessage:new', {
+      message: message.toObject(), chatId, fromUserId
+    });
+    
+    // Push всем участникам кроме отправителя
+    const sender = await User.findById(fromUserId).select('name').lean();
+    for (const member of chat.members) {
+      const memberId = member.userId.toString();
+      if (memberId === fromUserId) continue;
+      
+      const muted = await MutedUser.findOne({ userId: memberId, mutedUserId: fromUserId });
+      if (muted) continue;
+      
+      const recipient = await User.findById(memberId).select('pushToken language').lean();
+      if (recipient?.pushToken) {
+        const lang = recipient.language || 'en';
+        const preview = imageUrl && !text
+          ? { en: 'sent a photo', ru: 'отправил фото', es: 'envio una foto', uk: 'надіслав фото' }
+          : { en: (text || '').substring(0, 50), ru: (text || '').substring(0, 50), es: (text || '').substring(0, 50), uk: (text || '').substring(0, 50) };
+        sendPushNotification(recipient.pushToken, `👥 ${chat.name}`, `${sender?.name}: ${preview[lang] || preview.en}`, {
+          type: 'group_message', chatId
+        });
+      }
+    }
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    console.log("SEND GROUP MESSAGE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Пометить сообщения группового чата прочитанными
+app.post('/api/group-chats/:chatId/read', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { userId } = req.body;
+    
+    await GroupMessage.updateMany(
+      { chatId, readBy: { $ne: userId } },
+      { $addToSet: { readBy: userId } }
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("GROUP READ ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Удалить сообщение группового чата
+app.delete('/api/group-chats/message/:messageId', async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { userId, forAll } = req.body;
+    
+    const message = await GroupMessage.findById(messageId);
+    if (!message) return res.status(404).json({ success: false });
+    
+    if (forAll) {
+      if (message.fromUserId.toString() !== userId) {
+        return res.status(403).json({ success: false });
+      }
+      message.deletedForAll = true;
+      message.text = '';
+      message.image = '';
+      await message.save();
+      io.to(`groupchat:${message.chatId}`).emit('groupMessage:deleted', { messageId, forAll: true });
+    } else {
+      await GroupMessage.updateOne({ _id: messageId }, { $addToSet: { deletedFor: userId } });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("DELETE GROUP MESSAGE ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Добавить участников в групповой чат
+app.patch('/api/group-chats/:chatId/members', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { memberIds } = req.body;
+    
+    const chat = await GroupChat.findById(chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    
+    const existing = chat.members.map(m => m.userId.toString());
+    const newMembers = memberIds.filter(id => !existing.includes(id));
+    
+    for (const id of newMembers) {
+      chat.members.push({ userId: id });
+      emitToUser(id, 'groupChat:created', { chatId, name: chat.name });
+    }
+    await chat.save();
+    
+    res.json({ success: true, chat });
+  } catch (error) {
+    console.log("ADD GROUP MEMBERS ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Покинуть групповой чат
+app.post('/api/group-chats/:chatId/leave', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { userId } = req.body;
+    
+    await GroupChat.updateOne(
+      { _id: chatId },
+      { $pull: { members: { userId } } }
+    );
+    
+    // Если чат пустой - удаляем
+    const chat = await GroupChat.findById(chatId);
+    if (chat && chat.members.length === 0) {
+      await GroupMessage.deleteMany({ chatId });
+      await GroupChat.findByIdAndDelete(chatId);
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.log("LEAVE GROUP CHAT ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
 // Общее количество непрочитанных сообщений от друзей
 app.get('/api/users/:id/unread-messages', async (req, res) => {
   try {
@@ -1960,7 +2131,9 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
     // Непрочитанные сообщения
     const count = await FriendMessage.countDocuments({
       toUserId: userId,
-      read: false
+      read: false,
+      deletedForAll: { $ne: true },
+      deletedFor: { $ne: userId }
     });
     
     // Входящие заявки в друзья
@@ -1988,9 +2161,23 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
       convoyMessages += unread;
     }
     
-    res.json({ count, friendRequests, convoyInvites, convoyMessages });
+    // Непрочитанные сообщения групповых чатов
+    let groupChatMessages = 0;
+    const userGroupChats = await GroupChat.find({ 'members.userId': userId }).select('_id').lean();
+    for (const gc of userGroupChats) {
+      const unread = await GroupMessage.countDocuments({
+        chatId: gc._id,
+        fromUserId: { $ne: userId },
+        readBy: { $ne: userId },
+        deletedFor: { $ne: userId },
+        deletedForAll: { $ne: true }
+      });
+      groupChatMessages += unread;
+    }
+    
+    res.json({ count, friendRequests, convoyInvites, convoyMessages, groupChatMessages });
   } catch (error) {
-    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0 });
+    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0, groupChatMessages: 0 });
   }
 });
 
@@ -1999,17 +2186,6 @@ app.patch('/api/users/:id/hide-online', async (req, res) => {
   try {
     const { hideOnline } = req.body;
     await User.findByIdAndUpdate(req.params.id, { hideOnline });
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ success: false });
-  }
-});
-
-// Mute/unmute daily motivational push notifications
-app.patch('/api/users/:id/mute-daily-push', async (req, res) => {
-  try {
-    const { muteDailyPush } = req.body;
-    await User.findByIdAndUpdate(req.params.id, { muteDailyPush });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });

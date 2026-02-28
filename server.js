@@ -1998,6 +1998,13 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
       message: message.toObject(), chatId, fromUserId
     });
     
+    // WS персональный — для бейджей на MapScreen
+    for (const member of chat.members) {
+      const mid = member.userId.toString();
+      if (mid === fromUserId) continue;
+      emitToUser(mid, 'groupMessage:new', { chatId, fromUserId });
+    }
+    
     // Push всем участникам кроме отправителя
     const sender = await User.findById(fromUserId).select('name').lean();
     for (const member of chat.members) {

@@ -279,6 +279,14 @@ io.on('connection', (socket) => {
     socket.leave(`friendchat:${userId}:${friendId}`);
   });
 
+  socket.on('join:groupchat', (chatId) => {
+    if (chatId) socket.join(`groupchat:${chatId}`);
+  });
+
+  socket.on('leave:groupchat', (chatId) => {
+    if (chatId) socket.leave(`groupchat:${chatId}`);
+  });
+
   // Клиент подписывается на комнату каравана
   socket.on('join:convoy', (convoyId) => {
     if (convoyId) {
@@ -4525,7 +4533,7 @@ app.post('/api/group-chats', async (req, res) => {
     
     // Notify members via WS
     allMembers.forEach(uid => {
-      if (uid !== creatorId) emitToUser(uid, 'group:created', { chatId: chat._id.toString(), name });
+      if (uid !== creatorId) emitToUser(uid, 'groupChat:created', { chatId: chat._id.toString(), name });
     });
     
     res.json({ success: true, chat });
@@ -4605,7 +4613,7 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     // WS notify all members
     chat.members.forEach(uid => {
       if (uid.toString() !== fromUserId) {
-        emitToUser(uid, 'group:message', { chatId: chat._id.toString(), message: lastMsg });
+        emitToUser(uid, 'groupMessage:new', { chatId: chat._id.toString(), fromUserId, message: lastMsg });
       }
     });
     
@@ -4659,6 +4667,12 @@ app.delete('/api/group-chats/message/:messageId', async (req, res) => {
     
     if (forAll && msg.fromUserId?.toString() === userId) {
       msg.deletedForAll = true;
+      // WS notify all members about deletion
+      chat.members.forEach(uid => {
+        if (uid.toString() !== userId) {
+          emitToUser(uid, 'groupMessage:deleted', { chatId: chat._id.toString(), messageId: req.params.messageId, forAll: true });
+        }
+      });
     } else {
       if (!msg.deletedFor) msg.deletedFor = [];
       msg.deletedFor.push(userId);

@@ -1962,9 +1962,21 @@ app.get('/api/users/:id/unread-messages', async (req, res) => {
       convoyMessages += unread;
     }
     
-    res.json({ count, friendRequests, convoyInvites, convoyMessages });
+    // Непрочитанные групповые чаты
+    let groupMessages = 0;
+    const groupChats = await GroupChat.find({ members: userId }).select('messages readBy').lean();
+    for (const gc of groupChats) {
+      const readEntry = gc.readBy?.find(r => r.userId?.toString() === userId);
+      const readAt = readEntry?.readAt || new Date(0);
+      const unread = (gc.messages || []).filter(m => 
+        !m.deletedForAll && m.fromUserId?.toString() !== userId && new Date(m.createdAt) > new Date(readAt)
+      ).length;
+      groupMessages += unread;
+    }
+    
+    res.json({ count, friendRequests, convoyInvites, convoyMessages, groupMessages });
   } catch (error) {
-    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0 });
+    res.json({ count: 0, friendRequests: 0, convoyInvites: 0, convoyMessages: 0, groupMessages: 0 });
   }
 });
 
@@ -4559,7 +4571,7 @@ app.get('/api/group-chats/:userId', async (req, res) => {
         m.fromUserId?.toString() !== req.params.userId && 
         new Date(m.createdAt) > new Date(readAt)
       ).length || 0;
-      return { ...chat, lastMessage: lastMsg, unreadCount: unread, messages: undefined };
+      return { ...chat, membersInfo: chat.members, lastMessage: lastMsg, unreadCount: unread, messages: undefined };
     });
     
     res.json(result);

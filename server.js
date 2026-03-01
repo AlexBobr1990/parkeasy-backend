@@ -1121,7 +1121,7 @@ const sendDailyMotivationalPush = async () => {
 };
 
 // Check every hour if it's time to send
-setInterval(sendDailyMotivationalPush, 3600000);
+setInterval(sendDailyMotivationalPush, 300000);
 // Also check on startup (in case server restarted at 11 AM)
 setTimeout(sendDailyMotivationalPush, 30000);
 

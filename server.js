@@ -1049,6 +1049,7 @@ setInterval(() => {
 // ==================== DAILY MOTIVATIONAL PUSH CRON ====================
 
 let lastDailyPushDate = null;
+let lastEveningPushDate = null;
 
 const sendDailyMotivationalPush = async () => {
   try {
@@ -1056,9 +1057,13 @@ const sendDailyMotivationalPush = async () => {
     const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
     const todayStr = now.toISOString().split('T')[0];
 
-    // Only send at 11 AM EST, once per day
-    if (estHour !== 11 || lastDailyPushDate === todayStr) return;
-    lastDailyPushDate = todayStr;
+    // Send at 11 AM or 8 PM EST, once per slot per day
+    const isMorning = estHour === 11 && lastDailyPushDate !== todayStr;
+    const isEvening = estHour === 20 && lastEveningPushDate !== todayStr;
+    if (!isMorning && !isEvening) return;
+    
+    if (isMorning) lastDailyPushDate = todayStr;
+    if (isEvening) lastEveningPushDate = todayStr;
 
     console.log('📬 Starting daily motivational push...');
 

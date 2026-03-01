@@ -783,6 +783,8 @@ const Convoy = mongoose.model('Convoy', convoySchema);
 // ==================== APP SETTINGS ====================
 const appSettingsSchema = new mongoose.Schema({
   bookingRadiusKm: { type: Number, default: 5 },
+  lastPush_morning: { type: String, default: null },
+  lastPush_evening: { type: String, default: null },
   updatedAt: { type: Date, default: Date.now }
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
@@ -1048,24 +1050,35 @@ setInterval(() => {
 
 // ==================== DAILY MOTIVATIONAL PUSH CRON ====================
 
-let lastDailyPushDate = null;
-let lastEveningPushDate = null;
+let pushLock = false;
 
 const sendDailyMotivationalPush = async () => {
+  if (pushLock) return;
+  pushLock = true;
   try {
     const now = new Date();
     const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
     const todayStr = now.toISOString().split('T')[0];
+    const slot = estHour === 11 ? 'morning' : estHour === 20 ? 'evening' : null;
+    if (!slot) { pushLock = false; return; }
 
-    // Send at 11 AM or 8 PM EST, once per slot per day
-    const isMorning = estHour === 11 && lastDailyPushDate !== todayStr;
-    const isEvening = estHour === 20 && lastEveningPushDate !== todayStr;
-    if (!isMorning && !isEvening) return;
+    // Check MongoDB for last sent date per slot (survives redeploys)
+    const key = `lastPush_${slot}`;
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await new AppSettings({}).save();
     
-    if (isMorning) lastDailyPushDate = todayStr;
-    if (isEvening) lastEveningPushDate = todayStr;
+    const lastSent = settings[key] || settings.get(key);
+    if (lastSent === todayStr) { pushLock = false; return; }
+    
+    // Atomically mark as sent (prevents race conditions between restarts)
+    const updated = await AppSettings.findOneAndUpdate(
+      { [key]: { $ne: todayStr } },
+      { $set: { [key]: todayStr } },
+      { new: true }
+    );
+    if (!updated) { pushLock = false; return; }
 
-    console.log('📬 Starting daily motivational push...');
+    console.log(`📬 Starting ${slot} motivational push...`);
 
     // Gather dynamic stats
     const totalUsers = await User.countDocuments();
@@ -1117,6 +1130,8 @@ const sendDailyMotivationalPush = async () => {
     console.log(`📬 Daily push complete: ${sent}/${users.length} sent`);
   } catch (error) {
     console.log('📬 Daily push error:', error.message);
+  } finally {
+    pushLock = false;
   }
 };
 

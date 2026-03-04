@@ -3308,7 +3308,7 @@ app.get('/api/users/:id/balance', async (req, res) => {
 app.get('/api/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id)
-      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -avatar -__v')
+      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -__v')
       .lean();
     if (!user) return res.status(404).json(null);
     res.json({ ...user, id: user._id.toString() });
@@ -3353,7 +3353,6 @@ app.put("/api/users/:id", async (req, res) => {
     delete safeUser.appleId;
     delete safeUser.verificationCode;
     delete safeUser.resetCode;
-    delete safeUser.avatar;
     res.json({ success: true, user: safeUser });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server error" });

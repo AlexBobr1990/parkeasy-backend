@@ -30,9 +30,10 @@ async function uploadToCloudinary(base64Image, userId) {
         folder: 'parkbro/avatars',
         public_id: `user_${userId}`,
         overwrite: true,
+        invalidate: true,
         transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
       });
-      return result.secure_url;
+      return result.secure_url + '?v=' + Date.now();
     }
     
     // base64 формат
@@ -42,9 +43,10 @@ async function uploadToCloudinary(base64Image, userId) {
       folder: 'parkbro/avatars',
       public_id: `user_${userId}`,
       overwrite: true,
+      invalidate: true,
       transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
     });
-    return result.secure_url;
+    return result.secure_url + '?v=' + Date.now();
   } catch (error) {
     console.log('☁️ Cloudinary upload error:', error.message);
     return null;
@@ -598,7 +600,8 @@ const Rating = mongoose.model('Rating', ratingSchema);
 const friendMessageSchema = new mongoose.Schema({
   fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  text: { type: String, required: true },
+  text: { type: String, default: '' },
+  image: { type: String, default: null },
   read: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
@@ -1831,7 +1834,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
 // Отправить сообщение другу
 app.post('/api/friends/message', async (req, res) => {
   try {
-    const { fromUserId, toUserId, text } = req.body;
+    const { fromUserId, toUserId, text, imageBase64 } = req.body;
     
     // Проверяем что они друзья
     const friendship = await Friendship.findOne({
@@ -1856,7 +1859,13 @@ app.post('/api/friends/message', async (req, res) => {
       return res.status(403).json({ success: false, message: 'User is blocked' });
     }
     
-    const message = new FriendMessage({ fromUserId, toUserId, text });
+    // Загружаем фото в Cloudinary если есть
+    let image = null;
+    if (imageBase64) {
+      image = await uploadToCloudinary(imageBase64, `msg_${fromUserId}_${Date.now()}`);
+    }
+    
+    const message = new FriendMessage({ fromUserId, toUserId, text: text || '', image });
     await message.save();
     
     // 🔌 WebSocket: новое сообщение другу
@@ -1883,6 +1892,7 @@ app.post('/api/friends/message', async (req, res) => {
       
       if (recipient && recipient.pushToken) {
         const lang = recipient.language || 'en';
+        const msgPreview = image && !text ? '📷' : (text || '').substring(0, 50) + ((text || '').length > 50 ? '...' : '');
         const titles = {
           en: '💬 New message',
           ru: '💬 Новое сообщение',
@@ -1890,10 +1900,10 @@ app.post('/api/friends/message', async (req, res) => {
           uk: '💬 Нове повідомлення'
         };
         const bodies = {
-          en: `${sender?.name || 'Friend'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          ru: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          es: `${sender?.name || 'Amigo'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          uk: `${sender?.name || 'Друг'}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`
+          en: `${sender?.name || 'Friend'}: ${msgPreview}`,
+          ru: `${sender?.name || 'Друг'}: ${msgPreview}`,
+          es: `${sender?.name || 'Amigo'}: ${msgPreview}`,
+          uk: `${sender?.name || 'Друг'}: ${msgPreview}`
         };
         
         sendPushNotification(recipient.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {

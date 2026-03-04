@@ -1013,6 +1013,37 @@ async function createIndexes() {
     await UserStreak.collection.createIndex({ userId: 1 });
     
     console.log('✅ Индексы созданы');
+    
+    // Миграция: генерируем avatarThumb для юзеров у кого есть avatar но нет thumb
+    try {
+      const usersNoThumb = await User.find({ 
+        avatar: { $ne: null, $exists: true },
+        $or: [{ avatarThumb: null }, { avatarThumb: { $exists: false } }, { avatarThumb: '' }]
+      }).select('_id avatar').lean();
+      
+      if (usersNoThumb.length > 0) {
+        console.log(`🔄 Generating avatarThumb for ${usersNoThumb.length} users...`);
+        for (const u of usersNoThumb) {
+          try {
+            if (u.avatar && u.avatar.includes('res.cloudinary.com')) {
+              const thumb = getCloudinaryThumb(u.avatar, 80);
+              await User.updateOne({ _id: u._id }, { $set: { avatarThumb: thumb } });
+            } else if (u.avatar && u.avatar.startsWith('http')) {
+              const cloudUrl = await uploadToCloudinary(u.avatar, u._id.toString());
+              if (cloudUrl) {
+                const thumb = getCloudinaryThumb(cloudUrl, 80);
+                await User.updateOne({ _id: u._id }, { $set: { avatar: cloudUrl, avatarThumb: thumb } });
+              }
+            }
+          } catch (e) {
+            console.log(`  ⚠️ Failed for user ${u._id}:`, e.message);
+          }
+        }
+        console.log('✅ avatarThumb migration done');
+      }
+    } catch (migErr) {
+      console.log('⚠️ avatarThumb migration error:', migErr.message);
+    }
   } catch (error) {
     console.log('Indexes already exist or error:', error.message);
   }
@@ -1447,7 +1478,7 @@ app.get('/api/users/:id/referral-stats', async (req, res) => {
       earnings: user.referralEarnings || 0,
       referrals: referrals.map(r => ({
         name: r.name,
-        avatar: r.avatarThumb,
+        avatar: r.avatarThumb || null,
         deals: (r.parkingsGiven || 0) + (r.parkingsReceived || 0),
         joinedAt: r.createdAt
       }))
@@ -1634,7 +1665,7 @@ app.get('/api/users/:id/friends', async (req, res) => {
         id: friend._id,
         _id: friend._id,
         name: friend.name,
-        avatar: friend.avatarThumb, // Используем миниатюру
+        avatar: friend.avatarThumb || null,
         rating: friend.rating,
         ratingCount: friend.ratingCount,
         isOnline,
@@ -1765,7 +1796,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       
       return {
         id: friend._id, _id: friend._id, name: friend.name,
-        avatar: friend.avatarThumb, // Используем миниатюру
+        avatar: friend.avatarThumb || null,
         rating: friend.rating, ratingCount: friend.ratingCount, isOnline, lastSeenText,
         unreadCount: unreadMap[friend._id.toString()] || 0,
         isFavorite: friendData.isFavorite || false, friendshipId: friendData.friendshipId || null,
@@ -1787,7 +1818,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       .filter(r => r.user1 && !blockedIds.includes(r.user1._id.toString()))
       .map(r => ({ 
         friendshipId: r._id, 
-        user: { ...r.user1, avatar: r.user1.avatarThumb }, 
+        user: { ...r.user1, avatar: r.user1.avatarThumb || null }, 
         createdAt: r.createdAt 
       }));
     
@@ -1795,7 +1826,7 @@ app.get('/api/users/:id/friends-all', async (req, res) => {
       .filter(r => r.user2 && !blockedIds.includes(r.user2._id.toString()))
       .map(r => ({ 
         friendshipId: r._id, 
-        user: { ...r.user2, avatar: r.user2.avatarThumb }, 
+        user: { ...r.user2, avatar: r.user2.avatarThumb || null }, 
         createdAt: r.createdAt 
       }));
     

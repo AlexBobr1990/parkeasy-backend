@@ -3353,6 +3353,7 @@ app.put("/api/users/:id", async (req, res) => {
     delete safeUser.appleId;
     delete safeUser.verificationCode;
     delete safeUser.resetCode;
+    delete safeUser.avatar; // Не возвращаем полный avatar, только avatarThumb
     res.json({ success: true, user: safeUser });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server error" });

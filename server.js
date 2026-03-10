@@ -3519,6 +3519,13 @@ app.post('/api/users/:id/push-token', rateLimit('push-token', 5, 3600000), async
     if (!callerUserId || callerUserId !== req.params.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
+    // Remove this token from all other accounts (prevents duplicate pushes on device reuse)
+    if (pushToken) {
+      await User.updateMany(
+        { _id: { $ne: req.params.id }, pushToken },
+        { $unset: { pushToken: '' } }
+      );
+    }
     await User.findByIdAndUpdate(req.params.id, { pushToken });
     res.json({ success: true });
   } catch (error) {

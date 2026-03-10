@@ -482,6 +482,7 @@ const userSchema = new mongoose.Schema({
   lastDailyPush: Date,
   
   lastActivity: { type: Date, default: Date.now },
+  knownTickets: [{ type: String }], // summons numbers already notified
   lastLocation: { lat: Number, lng: Number },
   
   // Друзья и приватность
@@ -788,6 +789,7 @@ const appSettingsSchema = new mongoose.Schema({
   bookingRadiusKm: { type: Number, default: 5 },
   lastPush_morning: { type: String, default: null },
   lastPush_evening: { type: String, default: null },
+  lastTicketCheck: { type: String, default: null },
   updatedAt: { type: Date, default: Date.now }
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
@@ -1173,6 +1175,146 @@ const sendDailyMotivationalPush = async () => {
 setInterval(sendDailyMotivationalPush, 300000);
 // Also check on startup (in case server restarted at 11 AM)
 setTimeout(sendDailyMotivationalPush, 30000);
+
+// ==================== DAILY TICKETS CHECK CRON ====================
+
+let ticketCheckLock = false;
+
+const checkNewTicketsForAllUsers = async () => {
+  if (ticketCheckLock) return;
+  ticketCheckLock = true;
+  try {
+    const now = new Date();
+    const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
+    // Run only at 2 AM EST
+    if (estHour !== 2) { ticketCheckLock = false; return; }
+
+    // Prevent double-run same day
+    const todayStr = now.toISOString().split('T')[0];
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await new AppSettings({}).save();
+    if (settings.lastTicketCheck === todayStr) { ticketCheckLock = false; return; }
+    const updated = await AppSettings.findOneAndUpdate(
+      { lastTicketCheck: { $ne: todayStr } },
+      { $set: { lastTicketCheck: todayStr } },
+      { new: true }
+    );
+    if (!updated) { ticketCheckLock = false; return; }
+
+    console.log('🎫 Starting daily ticket check...');
+
+    // Get all users with push token and a plate number
+    const users = await User.find({
+      pushToken: { $exists: true, $nin: [null, ''] },
+      $or: [
+        { 'car.plate': { $exists: true, $nin: [null, ''] } },
+        { 'cars.0.plate': { $exists: true } }
+      ]
+    }).select('_id pushToken language car cars knownTickets').lean();
+
+    console.log(`🎫 Checking tickets for ${users.length} users`);
+    let notified = 0;
+
+    for (const user of users) {
+      try {
+        // Collect all unique plates for this user
+        const plates = new Set();
+        if (user.car?.plate) plates.add({ plate: user.car.plate, state: 'NY' });
+        for (const c of (user.cars || [])) {
+          if (c.plate) plates.add({ plate: c.plate, state: 'NY' });
+        }
+
+        const knownSet = new Set(user.knownTickets || []);
+        const newSummons = [];
+
+        for (const { plate, state } of plates) {
+          const plateClean = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
+          try {
+            const url = `https://data.cityofnewyork.us/resource/nc67-uf89.json?$where=plate='${plateClean}' AND state='${state}'&$order=issue_date DESC&$limit=50`;
+            const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+            if (!resp.ok) continue;
+            const data = await resp.json();
+
+            for (const t of data) {
+              const summons = t.summons_number;
+              if (!summons) continue;
+              const amountDue = parseFloat(t.amount_due || 0);
+              // New ticket = not seen before AND has amount due (unpaid)
+              if (!knownSet.has(summons) && amountDue > 0) {
+                newSummons.push({ summons, plate: plateClean, amountDue, violation: t.violation || 'Parking violation' });
+                knownSet.add(summons);
+              }
+            }
+          } catch (e) { /* skip plate */ }
+
+          // Small delay between plates
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        if (newSummons.length > 0) {
+          const lang = user.language || 'en';
+          const total = newSummons.reduce((s, t) => s + t.amountDue, 0).toFixed(0);
+          const titles = {
+            ru: `🎫 Новый штраф NYC`,
+            uk: `🎫 Новий штраф NYC`,
+            es: `🎫 Nueva multa NYC`,
+            en: `🎫 New NYC ticket`
+          };
+          const bodies = {
+            ru: newSummons.length === 1
+              ? `${newSummons[0].plate}: ${newSummons[0].violation} — ${newSummons[0].amountDue}`
+              : `${newSummons[0].plate}: ${newSummons.length} новых штрафа на ${total}`,
+            uk: newSummons.length === 1
+              ? `${newSummons[0].plate}: ${newSummons[0].violation} — ${newSummons[0].amountDue}`
+              : `${newSummons[0].plate}: ${newSummons.length} нових штрафи на ${total}`,
+            es: newSummons.length === 1
+              ? `${newSummons[0].plate}: ${newSummons[0].violation} — ${newSummons[0].amountDue}`
+              : `${newSummons[0].plate}: ${newSummons.length} nuevas multas por ${total}`,
+            en: newSummons.length === 1
+              ? `${newSummons[0].plate}: ${newSummons[0].violation} — ${newSummons[0].amountDue}`
+              : `${newSummons[0].plate}: ${newSummons.length} new tickets totaling ${total}`
+          };
+
+          await sendPushNotification(
+            user.pushToken,
+            titles[lang] || titles.en,
+            bodies[lang] || bodies.en,
+            { type: 'new_ticket', plate: newSummons[0].plate }
+          );
+          notified++;
+
+          // Save known summons so we don't notify again
+          await User.findByIdAndUpdate(user._id, {
+            $addToSet: { knownTickets: { $each: newSummons.map(t => t.summons) } }
+          });
+        } else {
+          // Even if no new tickets, record all current summons as known
+          // (so we don't spam on first run)
+          if (user.knownTickets?.length === 0 && knownSet.size > 0) {
+            await User.findByIdAndUpdate(user._id, {
+              $set: { knownTickets: Array.from(knownSet) }
+            });
+          }
+        }
+
+        // Delay between users to avoid NYC API rate limits
+        await new Promise(r => setTimeout(r, 1000));
+      } catch (e) { /* skip user */ }
+    }
+
+    console.log(`🎫 Ticket check done: ${notified} users notified`);
+  } catch (e) {
+    console.log('🎫 Ticket check error:', e.message);
+  } finally {
+    ticketCheckLock = false;
+  }
+};
+
+// Check every hour, runs logic only at 2 AM EST
+setInterval(checkNewTicketsForAllUsers, 3600000);
+setTimeout(checkNewTicketsForAllUsers, 60000);
+
+
 
 // ==================== ROUTES ====================
 

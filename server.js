@@ -6337,16 +6337,10 @@ app.get('/api/tickets/check', async (req, res) => {
     const plateClean = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
     // NYC Open Data SODA API - Open Parking and Camera Violations
-    // cache-bust param forces NYC to return fresh data every time, not cached response
-    const cacheBust = Date.now();
-    const url = `https://data.cityofnewyork.us/resource/nc67-uf89.json?$where=plate='${plateClean}' AND state='${stateCode}'&$order=issue_date DESC&$limit=500&$$cacheBust=${cacheBust}`;
+    const url = `https://data.cityofnewyork.us/resource/nc67-uf89.json?$where=plate='${plateClean}' AND state='${stateCode}'&$order=issue_date DESC&$limit=500`;
 
     const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-        'Cache-Control': 'no-cache, no-store',
-        'Pragma': 'no-cache',
-      }
+      headers: { 'Accept': 'application/json' }
     });
 
     if (!response.ok) {

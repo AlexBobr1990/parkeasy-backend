@@ -794,6 +794,26 @@ const appSettingsSchema = new mongoose.Schema({
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
 
+// ==================== MOTIVATIONAL MESSAGES ====================
+const motivationalMessageSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  title: {
+    en: { type: String, default: '' },
+    ru: { type: String, default: '' },
+    uk: { type: String, default: '' },
+    es: { type: String, default: '' }
+  },
+  body: {
+    en: { type: String, default: '' },
+    ru: { type: String, default: '' },
+    uk: { type: String, default: '' },
+    es: { type: String, default: '' }
+  },
+  enabled: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const MotivationalMessage = mongoose.model('MotivationalMessage', motivationalMessageSchema);
+
 // ==================== ASP (Alternate Side Parking) Models ====================
 
 const aspZoneSchema = new mongoose.Schema({
@@ -1051,6 +1071,24 @@ async function createIndexes() {
   }
 }
 
+// ==================== MOTIVATIONAL MESSAGES SEED ====================
+const seedMotivationalMessages = async () => {
+  try {
+    const count = await MotivationalMessage.countDocuments();
+    if (count > 0) return; // Already seeded
+    console.log('🌱 Seeding motivational messages...');
+    await MotivationalMessage.insertMany(motivationalMessages.map(m => ({
+      id: m.id,
+      title: m.title,
+      body: m.body,
+      enabled: true
+    })));
+    console.log(`🌱 Seeded ${motivationalMessages.length} motivational messages`);
+  } catch (err) {
+    console.error('🌱 Seed error:', err.message);
+  }
+};
+
 // ==================== TIMER ====================
 
 
@@ -1136,14 +1174,17 @@ const sendDailyMotivationalPush = async () => {
 
     console.log(`📬 Sending to ${users.length} users (total: ${totalUsers}, parkings: ${parkingsCount})`);
 
+    // Load enabled messages from DB (fallback to hardcoded if DB empty)
+    let dbMessages = await MotivationalMessage.find({ enabled: true }).lean();
+    if (!dbMessages.length) dbMessages = motivationalMessages;
+    if (parkingsCount < 3) dbMessages = dbMessages.filter(m => m.id !== 'today_helped');
+    if (totalUsers < 10) dbMessages = dbMessages.filter(m => m.id !== 'community_size');
+    if (!dbMessages.length) dbMessages = await MotivationalMessage.find({}).lean();
+
     let sent = 0;
     for (const u of users) {
       try {
-        // Pick a random message, skip community stats if numbers are too low
-        let pool = [...motivationalMessages];
-        if (parkingsCount < 3) pool = pool.filter(m => m.id !== 'today_helped');
-        if (totalUsers < 10) pool = pool.filter(m => m.id !== 'community_size');
-        const msg = pool[Math.floor(Math.random() * pool.length)];
+        const msg = dbMessages[Math.floor(Math.random() * dbMessages.length)];
         const lang = u.language || 'en';
 
         const title = msg.title[lang] || msg.title.en;
@@ -6721,12 +6762,76 @@ app.get('/api/admin/asp/stats', async (req, res) => {
   }
 });
 
+// ==================== ADMIN: MOTIVATIONAL MESSAGES ====================
+
+app.get('/api/admin/motivational-messages', async (req, res) => {
+  try {
+    const messages = await MotivationalMessage.find({}).sort({ createdAt: 1 }).lean();
+    res.json({ success: true, messages });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/admin/motivational-messages', async (req, res) => {
+  try {
+    const { id, title, body, enabled } = req.body;
+    if (!id || !title?.en || !body?.en) {
+      return res.status(400).json({ success: false, message: 'id, title.en and body.en are required' });
+    }
+    const exists = await MotivationalMessage.findOne({ id });
+    if (exists) return res.status(400).json({ success: false, message: 'Message with this id already exists' });
+    const msg = await MotivationalMessage.create({ id, title, body, enabled: enabled !== false });
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.put('/api/admin/motivational-messages/:id', async (req, res) => {
+  try {
+    const { title, body, enabled } = req.body;
+    const msg = await MotivationalMessage.findByIdAndUpdate(
+      req.params.id,
+      { $set: { title, body, enabled } },
+      { new: true }
+    );
+    if (!msg) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.delete('/api/admin/motivational-messages/:id', async (req, res) => {
+  try {
+    const msg = await MotivationalMessage.findByIdAndDelete(req.params.id);
+    if (!msg) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.patch('/api/admin/motivational-messages/:id/toggle', async (req, res) => {
+  try {
+    const msg = await MotivationalMessage.findById(req.params.id);
+    if (!msg) return res.status(404).json({ success: false, message: 'Not found' });
+    msg.enabled = !msg.enabled;
+    await msg.save();
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ==================== START ====================
 
 const server = httpServer.listen(PORT, () => {
   console.log(`🚗 ParkBro API running on port ${PORT}`);
   console.log('✅ Сервер готов (HTTP + WebSocket)');
   console.log(`🔌 Socket.IO ready`);
+  seedMotivationalMessages();
 });
 
 // Graceful shutdown — корректное завершение при перезапуске Railway

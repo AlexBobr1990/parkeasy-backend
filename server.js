@@ -789,6 +789,8 @@ const appSettingsSchema = new mongoose.Schema({
   bookingRadiusKm: { type: Number, default: 5 },
   lastPush_morning: { type: String, default: null },
   lastPush_evening: { type: String, default: null },
+  pushHour_morning: { type: Number, default: 11 },
+  pushHour_evening: { type: Number, default: 20 },
   lastTicketCheck: { type: String, default: null },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -1133,14 +1135,17 @@ const sendDailyMotivationalPush = async () => {
     const now = new Date();
     const estHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
     const todayStr = now.toISOString().split('T')[0];
-    const slot = estHour === 11 ? 'morning' : estHour === 20 ? 'evening' : null;
+
+    // Read push hours from DB (fallback to defaults 11/20)
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await new AppSettings({}).save();
+    const morningHour = settings.pushHour_morning ?? 11;
+    const eveningHour = settings.pushHour_evening ?? 20;
+    const slot = estHour === morningHour ? 'morning' : estHour === eveningHour ? 'evening' : null;
     if (!slot) { pushLock = false; return; }
 
     // Check MongoDB for last sent date per slot (survives redeploys)
     const key = `lastPush_${slot}`;
-    let settings = await AppSettings.findOne();
-    if (!settings) settings = await new AppSettings({}).save();
-    
     const lastSent = settings[key] || settings.get(key);
     if (lastSent === todayStr) { pushLock = false; return; }
     
@@ -6362,6 +6367,58 @@ app.put('/api/settings/booking-radius', async (req, res) => {
     
     console.log(`📏 Booking radius updated to ${radius} km`);
     res.json({ success: true, bookingRadiusKm: radius });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== PUSH SCHEDULE SETTINGS ====================
+
+app.get('/api/settings/push-schedule', async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne().lean();
+    if (!settings) settings = await new AppSettings({}).save();
+    res.json({
+      success: true,
+      pushHour_morning: settings.pushHour_morning ?? 11,
+      pushHour_evening: settings.pushHour_evening ?? 20
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.put('/api/settings/push-schedule', async (req, res) => {
+  try {
+    const { pushHour_morning, pushHour_evening, adminId } = req.body;
+
+    // Проверка админ-доступа
+    if (adminId) {
+      const admin = await User.findById(adminId).select('isAdmin').lean();
+      if (!admin?.isAdmin) return res.status(403).json({ success: false, message: 'Admin access denied' });
+    } else {
+      const secret = req.headers['x-admin-secret'] || req.query.secret;
+      if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+        return res.status(403).json({ success: false, message: 'Admin access denied' });
+      }
+    }
+
+    const mh = Math.max(0, Math.min(23, Number(pushHour_morning)));
+    const eh = Math.max(0, Math.min(23, Number(pushHour_evening)));
+    if (mh === eh) return res.status(400).json({ success: false, message: 'Morning and evening hours must differ' });
+
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = new AppSettings({});
+    settings.pushHour_morning = mh;
+    settings.pushHour_evening = eh;
+    settings.updatedAt = new Date();
+    await settings.save();
+
+    cachedAppSettings = null;
+    appSettingsCacheTime = 0;
+
+    console.log(`⏰ Push schedule updated: morning=${mh}h, evening=${eh}h EST`);
+    res.json({ success: true, pushHour_morning: mh, pushHour_evening: eh });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

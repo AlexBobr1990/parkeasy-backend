@@ -583,7 +583,7 @@ const ratingSchema = new mongoose.Schema({
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
   helpRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'HelpRequest' },
   rating: { type: Number, required: true, min: 1, max: 5 },
-  problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'didnt_help', 'slow_response', 'couldnt_help', 'already_solved', 'false_info', 'changed_mind', 'other'] }],
+  problems: [{ type: String, enum: ['left_early', 'spot_taken', 'long_wait', 'wrong_location', 'no_show', 'rude', 'didnt_help', 'slow_response', 'couldnt_help', 'already_solved', 'false_info', 'changed_mind', 'no_communication', 'other'] }],
   comment: String,
   fromRole: String,
   lastActivity: { type: Date, default: Date.now },

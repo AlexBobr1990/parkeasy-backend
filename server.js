@@ -880,6 +880,7 @@ const groupChatSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId },
     readAt: { type: Date, default: Date.now }
   }],
+  isForum: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 const GroupChat = mongoose.model('GroupChat', groupChatSchema);
@@ -4840,7 +4841,7 @@ app.post('/api/group-chats', async (req, res) => {
 // Get user's group chats
 app.get('/api/group-chats/:userId', async (req, res) => {
   try {
-    const chats = await GroupChat.find({ members: req.params.userId })
+    const chats = await GroupChat.find({ members: req.params.userId, isForum: { $ne: true } })
       .populate('members', 'name avatar avatarThumb')
       .sort({ 'messages.createdAt': -1, createdAt: -1 })
       .lean();
@@ -4883,7 +4884,12 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     const { fromUserId, text, imageBase64 } = req.body;
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
-    
+
+    // Auto-add user to forum members
+    if (chat.isForum && !chat.members.some(m => m.toString() === fromUserId)) {
+      chat.members.push(fromUserId);
+    }
+
     const sender = await User.findById(fromUserId).select('name avatar avatarThumb').lean();
     
     let image = null;
@@ -4936,7 +4942,12 @@ app.post('/api/group-chats/:chatId/read', async (req, res) => {
     const { userId } = req.body;
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
-    
+
+    // Auto-add user to forum members
+    if (chat.isForum && !chat.members.some(m => m.toString() === userId)) {
+      chat.members.push(userId);
+    }
+
     const existing = chat.readBy.find(r => r.userId?.toString() === userId);
     if (existing) {
       existing.readAt = new Date();
@@ -5016,6 +5027,47 @@ app.post('/api/group-chats/:chatId/leave', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
+  }
+});
+
+// ==================== FORUM ====================
+
+// Get all forum topics
+app.get('/api/forum', async (req, res) => {
+  try {
+    const topics = await GroupChat.find({ isForum: true })
+      .populate('creatorId', 'name')
+      .lean();
+
+    const result = topics.map(t => ({
+      _id: t._id,
+      name: t.name,
+      creatorId: t.creatorId?._id || t.creatorId,
+      creatorName: t.creatorId?.name || '',
+      messageCount: (t.messages || []).filter(m => !m.deletedForAll).length,
+      members: t.members,
+      createdAt: t.createdAt
+    })).sort((a, b) => b.messageCount - a.messageCount);
+
+    res.json(result);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+// Create forum topic
+app.post('/api/forum', async (req, res) => {
+  try {
+    const { creatorId, name } = req.body;
+    if (!creatorId || !name) {
+      return res.status(400).json({ success: false, message: 'Name required' });
+    }
+
+    const topic = new GroupChat({ name, creatorId, members: [creatorId], isForum: true, messages: [] });
+    await topic.save();
+    res.json({ success: true, topic });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

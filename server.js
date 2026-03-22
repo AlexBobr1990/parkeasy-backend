@@ -904,6 +904,7 @@ const groupChatSchema = new mongoose.Schema({
     readAt: { type: Date, default: Date.now }
   }],
   isForum: { type: Boolean, default: false },
+  isPinned: { type: Boolean, default: false },
   forumNotifyUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   createdAt: { type: Date, default: Date.now }
 });
@@ -5108,9 +5109,13 @@ app.get('/api/forum', async (req, res) => {
         members: t.members,
         membersInfo: t.members,
         isForum: true,
+        isPinned: t.isPinned || false,
         createdAt: t.createdAt
       };
-    }).sort((a, b) => b.messageCount - a.messageCount);
+    }).sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return b.isPinned ? 1 : -1;
+      return b.messageCount - a.messageCount;
+    });
 
     res.json(result);
   } catch (error) {
@@ -7015,6 +7020,102 @@ app.patch('/api/admin/motivational-messages/:id/toggle', async (req, res) => {
     res.json({ success: true, message: msg });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==================== ADMIN: FORUM ====================
+
+// Get all forum topics for admin
+app.get('/api/admin/forum', async (req, res) => {
+  try {
+    const topics = await GroupChat.find({ isForum: true })
+      .populate('creatorId', 'name email')
+      .lean();
+
+    const result = topics.map(t => {
+      const activeMessages = (t.messages || []).filter(m => !m.deletedForAll);
+      return {
+        _id: t._id,
+        name: t.name,
+        creatorId: t.creatorId?._id || t.creatorId,
+        creatorName: t.creatorId?.name || '',
+        creatorEmail: t.creatorId?.email || '',
+        messageCount: activeMessages.length,
+        totalMessages: (t.messages || []).length,
+        membersCount: (t.members || []).length,
+        isPinned: t.isPinned || false,
+        createdAt: t.createdAt
+      };
+    }).sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return b.isPinned ? 1 : -1;
+      return b.messageCount - a.messageCount;
+    });
+
+    res.json({ success: true, topics: result });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get messages of a forum topic for admin
+app.get('/api/admin/forum/:chatId/messages', async (req, res) => {
+  try {
+    const chat = await GroupChat.findById(req.params.chatId).lean();
+    if (!chat) return res.status(404).json({ success: false });
+    const messages = (chat.messages || [])
+      .filter(m => !m.deletedForAll)
+      .map(m => ({
+        _id: m._id,
+        senderName: m.senderName,
+        senderAvatar: m.senderAvatar,
+        fromUserId: m.fromUserId,
+        text: m.text,
+        image: m.image,
+        imageThumb: m.imageThumb,
+        createdAt: m.createdAt
+      }));
+    res.json({ success: true, messages, topicName: chat.name });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Delete entire forum topic
+app.delete('/api/admin/forum/:chatId', async (req, res) => {
+  try {
+    await GroupChat.findByIdAndDelete(req.params.chatId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Delete a message in forum topic (admin)
+app.delete('/api/admin/forum/:chatId/messages/:messageId', async (req, res) => {
+  try {
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat) return res.status(404).json({ success: false });
+    const msg = chat.messages.id(req.params.messageId);
+    if (msg) {
+      msg.deletedForAll = true;
+      await chat.save();
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Toggle pin forum topic
+app.post('/api/admin/forum/:chatId/pin', async (req, res) => {
+  try {
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat || !chat.isForum) return res.status(404).json({ success: false });
+    chat.isPinned = !chat.isPinned;
+    await chat.save();
+    res.json({ success: true, isPinned: chat.isPinned });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

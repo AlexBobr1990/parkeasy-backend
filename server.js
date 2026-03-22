@@ -7,6 +7,44 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'parkbro-jwt-secret-2025-xK9m';
+const JWT_EXPIRES = '30d'; // 30 days
+
+function generateTokens(userId) {
+  const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+  const refreshToken = jwt.sign({ userId, type: 'refresh' }, JWT_SECRET, { expiresIn: '90d' });
+  return { token, refreshToken };
+}
+
+// Auth middleware — transitional: allows requests without token (for old app versions)
+function optionalAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
+      req.authUserId = decoded.userId;
+    } catch (e) {
+      // Expired or invalid token — still allow (transitional)
+    }
+  }
+  next();
+}
+
+// Strict auth — use after all clients updated
+function requireAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, message: 'Auth required' });
+  }
+  try {
+    const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
+    req.authUserId = decoded.userId;
+    next();
+  } catch (e) {
+    return res.status(401).json({ success: false, message: 'Token expired' });
+  }
+}
 const sharp = require('sharp');
 const cloudinary = require('cloudinary').v2;
 
@@ -408,6 +446,7 @@ const adminAuth = async (req, res, next) => {
 
 // Применяем ко всем /api/admin/* маршрутам
 app.use('/api/admin', adminAuth);
+app.use('/api', optionalAuth); // JWT auth on all /api routes (transitional — allows unauthenticated)
 
 // ==================== REQUEST COUNTER ====================
 let requestLog = [];
@@ -3144,8 +3183,10 @@ app.post('/api/auth/login', rateLimit('login', 10, 900000), async (req, res) => 
         user.referralCode = user.name.substring(0, 3).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
         await user.save();
       }
+      const tokens = generateTokens(user._id.toString());
       res.json({
         success: true,
+        ...tokens,
         user: {
           id: user._id.toString(),
           email: user.email,
@@ -3265,8 +3306,10 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
       }).save();
     }
     
+    const tokens = generateTokens(user._id.toString());
     res.json({
       success: true,
+      ...tokens,
       user: {
         id: user._id.toString(),
         email: user.email,
@@ -3367,8 +3410,10 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
       }).save();
     }
     
+    const tokens = generateTokens(user._id.toString());
     res.json({
       success: true,
+      ...tokens,
       user: {
         id: user._id.toString(),
         email: user.email,
@@ -3389,6 +3434,22 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
     console.log("CREATE PARKING ERROR:", error);
     console.error('Apple auth error:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
+
+// Refresh JWT token
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ success: false });
+    const decoded = jwt.verify(refreshToken, JWT_SECRET);
+    if (decoded.type !== 'refresh') return res.status(401).json({ success: false });
+    const user = await User.findById(decoded.userId).select('_id').lean();
+    if (!user) return res.status(401).json({ success: false });
+    const tokens = generateTokens(user._id.toString());
+    res.json({ success: true, ...tokens });
+  } catch (e) {
+    res.status(401).json({ success: false, message: 'Invalid refresh token' });
   }
 });
 

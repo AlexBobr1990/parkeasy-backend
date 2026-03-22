@@ -588,7 +588,7 @@ const bookingSchema = new mongoose.Schema({
 
 const transactionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'referral_passive', 'help_payment', 'help_reward', 'daily_task', 'streak_bonus', 'achievement'], required: true },
+  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'referral_passive', 'help_payment', 'help_reward', 'help_reserve', 'help_refund', 'daily_task', 'streak_bonus', 'achievement'], required: true },
   amount: { type: Number, required: true },
   description: { type: String, required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -3694,7 +3694,8 @@ app.post('/api/help-requests/create', async (req, res) => {
 
     res.json({ success: true, helpRequest });
   } catch (error) {
-    res.status(500).json({ success: false });
+    console.log('Help create error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

@@ -445,8 +445,8 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-const MONGODB_URI = process.env.MONGODB_URI;
-if (!MONGODB_URI) { console.error('FATAL: MONGODB_URI env var not set'); process.exit(1); }
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+if (!process.env.MONGODB_URI) console.warn('WARNING: MONGODB_URI not set, using fallback. Set it in Railway env vars!');
 const PORT = process.env.PORT || 3001;
 
 // ==================== SCHEMAS ====================

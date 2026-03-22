@@ -872,6 +872,13 @@ const groupChatSchema = new mongoose.Schema({
     senderAvatar: String,
     text: String,
     image: String,
+    imageThumb: String,
+    replyTo: {
+      messageId: { type: mongoose.Schema.Types.ObjectId },
+      text: String,
+      senderName: String,
+      image: Boolean
+    },
     deletedFor: [{ type: mongoose.Schema.Types.ObjectId }],
     deletedForAll: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
@@ -881,6 +888,7 @@ const groupChatSchema = new mongoose.Schema({
     readAt: { type: Date, default: Date.now }
   }],
   isForum: { type: Boolean, default: false },
+  forumNotifyUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   createdAt: { type: Date, default: Date.now }
 });
 const GroupChat = mongoose.model('GroupChat', groupChatSchema);
@@ -4881,7 +4889,7 @@ app.get('/api/group-chats/:chatId/messages/:userId', async (req, res) => {
 // Send group message
 app.post('/api/group-chats/:chatId/message', async (req, res) => {
   try {
-    const { fromUserId, text, imageBase64 } = req.body;
+    const { fromUserId, text, imageBase64, replyTo } = req.body;
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
 
@@ -4891,35 +4899,54 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     }
 
     const sender = await User.findById(fromUserId).select('name avatar avatarThumb').lean();
-    
+
     let image = null;
+    let imageThumb = null;
     if (imageBase64) {
       image = await uploadToCloudinary(imageBase64, fromUserId);
+      if (image) {
+        imageThumb = getCloudinaryThumb(image, 300);
+      }
     }
-    
+
     const message = {
       fromUserId,
       senderName: sender?.name || 'User',
       senderAvatar: sender?.avatarThumb || sender?.avatar || null,
       text: text || '',
       image,
+      imageThumb,
+      replyTo: replyTo || undefined,
       createdAt: new Date()
     };
-    
+
     chat.messages.push(message);
     await chat.save();
-    
+
     const lastMsg = chat.messages[chat.messages.length - 1];
-    
+
     // WS notify all members
     chat.members.forEach(uid => {
       if (uid.toString() !== fromUserId) {
         emitToUser(uid, 'groupMessage:new', { chatId: chat._id.toString(), fromUserId, message: lastMsg });
       }
     });
-    
-    // Push to members (skip for forum topics — no push by default)
-    if (!chat.isForum) {
+
+    // Push to members
+    if (chat.isForum) {
+      // Forum: only push to users who opted in
+      if (chat.forumNotifyUsers && chat.forumNotifyUsers.length > 0) {
+        const notifyIds = chat.forumNotifyUsers.filter(id => id.toString() !== fromUserId);
+        if (notifyIds.length > 0) {
+          const members = await User.find({ _id: { $in: notifyIds } }).select('pushToken language').lean();
+          members.forEach(m => {
+            if (m.pushToken) {
+              sendPushNotification(m.pushToken, `${chat.name}`, `${sender?.name || 'User'}: ${text || '📷'}`, { type: 'group_message', chatId: chat._id.toString() });
+            }
+          });
+        }
+      }
+    } else {
       const members = await User.find({ _id: { $in: chat.members.filter(id => id.toString() !== fromUserId) } })
         .select('pushToken language').lean();
       members.forEach(m => {
@@ -5060,6 +5087,7 @@ app.get('/api/forum', async (req, res) => {
         creatorId: t.creatorId?._id || t.creatorId,
         creatorName: t.creatorId?.name || '',
         messageCount: activeMessages.length,
+        notifyEnabled: reqUserId ? (t.forumNotifyUsers || []).some(id => id.toString() === reqUserId) : false,
         unreadCount,
         members: t.members,
         membersInfo: t.members,
@@ -5087,6 +5115,27 @@ app.post('/api/forum', async (req, res) => {
     res.json({ success: true, topic });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Toggle forum notifications for user
+app.post('/api/forum/:chatId/notify', async (req, res) => {
+  try {
+    const { userId, enabled } = req.body;
+    const chat = await GroupChat.findById(req.params.chatId);
+    if (!chat || !chat.isForum) return res.status(404).json({ success: false });
+
+    if (enabled) {
+      if (!chat.forumNotifyUsers.some(id => id.toString() === userId)) {
+        chat.forumNotifyUsers.push(userId);
+      }
+    } else {
+      chat.forumNotifyUsers = chat.forumNotifyUsers.filter(id => id.toString() !== userId);
+    }
+    await chat.save();
+    res.json({ success: true, enabled });
+  } catch (error) {
+    res.status(500).json({ success: false });
   }
 });
 

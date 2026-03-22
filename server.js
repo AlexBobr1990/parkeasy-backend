@@ -3665,10 +3665,17 @@ app.post('/api/help-requests/create', async (req, res) => {
     // Лимит награды: максимум 100 баллов
     const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 100);
 
-    // Лимит: 1 активный запрос на пользователя
-    const existing = await HelpRequest.findOne({ userId, status: { $in: ['active', 'accepted'] } }).lean();
+    // Лимит: 1 активный (не истёкший) запрос на пользователя
+    const existing = await HelpRequest.findOne({ userId, status: { $in: ['active', 'accepted'] }, expiresAt: { $gt: new Date() } }).lean();
     if (existing) {
       return res.status(400).json({ success: false, message: 'You already have an active help request' });
+    }
+    // Auto-expire and refund any stale requests
+    const stale = await HelpRequest.find({ userId, status: { $in: ['active', 'accepted'] }, expiresAt: { $lte: new Date() } });
+    for (const s of stale) {
+      s.status = 'expired';
+      await s.save();
+      await User.findByIdAndUpdate(userId, { $inc: { balance: s.reward } });
     }
 
     // Резервируем баллы атомарно (списываем сразу)

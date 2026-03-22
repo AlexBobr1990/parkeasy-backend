@@ -267,15 +267,20 @@ const io = new Server(httpServer, {
 // userId → Set<socketId> (один юзер может иметь несколько соединений)
 const userSockets = new Map();
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const userId = socket.handshake.auth?.userId || socket.handshake.query?.userId;
-  
+
   if (userId) {
+    // Validate userId exists in DB
+    try {
+      const exists = await User.exists({ _id: userId });
+      if (!exists) { socket.disconnect(true); return; }
+    } catch (e) { socket.disconnect(true); return; }
+
     if (!userSockets.has(userId)) userSockets.set(userId, new Set());
     userSockets.get(userId).add(socket.id);
-    console.log(`🔌 WS connected: user=${userId}, socket=${socket.id}, online=${userSockets.size}`);
-    
-    // Обновляем lastActivity
+    console.log(`WS connected: user=${userId}, socket=${socket.id}, online=${userSockets.size}`);
+
     User.findByIdAndUpdate(userId, { lastActivity: new Date() }).catch(() => {});
   }
   
@@ -393,11 +398,9 @@ const adminAuth = async (req, res, next) => {
     } catch (e) {}
   }
   
-  // Если ADMIN_SECRET не установлен и adminId не передан — пропускаем (обратная совместимость)
-  // ВАЖНО: установи ADMIN_SECRET в env переменных на сервере для полной защиты!
+  // Если ADMIN_SECRET не установлен — блокируем все admin запросы
   if (!ADMIN_SECRET) {
-    console.warn(`⚠️ ADMIN endpoint accessed without auth: ${req.method} ${req.path} — set ADMIN_SECRET env var to protect!`);
-    return next();
+    console.error(`🚫 ADMIN endpoint BLOCKED (no ADMIN_SECRET): ${req.method} ${req.path}`);
   }
   
   return res.status(403).json({ success: false, message: 'Admin access denied' });
@@ -442,7 +445,8 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error('FATAL: MONGODB_URI env var not set'); process.exit(1); }
 const PORT = process.env.PORT || 3001;
 
 // ==================== SCHEMAS ====================
@@ -507,6 +511,7 @@ const userSchema = new mongoose.Schema({
   // Статистика
   parkingsGiven: { type: Number, default: 0 },
   parkingsReceived: { type: Number, default: 0 },
+  totalPointsEarned: { type: Number, default: 0 },
   
   // Достижения
   achievements: [{
@@ -948,9 +953,16 @@ async function creditReferralPassive(userId, description) {
   try {
     const user = await User.findById(userId).select('referredBy name').lean();
     if (!user || !user.referredBy) return;
+
+    // Cap: max 5 referral passive credits per day per referrer
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const todayCount = await Transaction.countDocuments({
+      userId: user.referredBy, type: 'referral_passive', createdAt: { $gte: todayStart }
+    });
+    if (todayCount >= 5) return;
+
     await User.findByIdAndUpdate(user.referredBy, { $inc: { balance: 1, referralEarnings: 1 } });
-    await new Transaction({ userId: user.referredBy, type: 'referral_passive', amount: 1, description: `Реферал ${user.name}: ${description}` }).save();
-    console.log(`💎 Referral passive +1 to referrer of ${user.name}`);
+    await new Transaction({ userId: user.referredBy, type: 'referral_passive', amount: 1, description: `Referral ${user.name}: ${description}` }).save();
   } catch (err) {
     console.log('Referral passive error:', err.message);
   }
@@ -1122,14 +1134,19 @@ const seedMotivationalMessages = async () => {
 
 setInterval(async () => {
   try {
+    // Expire available parkings
     const expiredResult = await Parking.updateMany(
       { status: 'available', expiresAt: { $lte: new Date() } },
       { status: 'expired' }
     );
-    // 🔌 WebSocket: если парковки истекли — уведомляем всех
-    if (expiredResult.modifiedCount > 0) {
-      emitToAll('parking:expired', { count: expiredResult.modifiedCount });
-      // Также просим всех обновить список парковок
+    // Expire stale booked parkings (booked > 30 min past expiry with no activity)
+    const staleBooked = await Parking.updateMany(
+      { status: 'booked', expiresAt: { $lte: new Date(Date.now() - 30 * 60000) } },
+      { status: 'expired' }
+    );
+    const totalExpired = (expiredResult.modifiedCount || 0) + (staleBooked.modifiedCount || 0);
+    if (totalExpired > 0) {
+      emitToAll('parking:expired', { count: totalExpired });
       emitToAll('parkings:refresh', {});
     }
   } catch (error) {
@@ -2476,13 +2493,7 @@ app.post('/api/friends/favorite', async (req, res) => {
     });
     
     if (!friendship) {
-      // Создаём новую дружбу
-      friendship = new Friendship({ 
-        user1: userId, 
-        user2: friendId, 
-        status: 'accepted',
-        favorite1: true
-      });
+      return res.status(404).json({ success: false, message: 'Friendship not found' });
     } else {
       // Обновляем избранное
       if (friendship.user1.toString() === userId) {
@@ -3650,26 +3661,37 @@ app.get('/api/help-requests', async (req, res) => {
 app.post('/api/help-requests/create', async (req, res) => {
   try {
     const { userId, location, address, problemType, description, reward } = req.body;
-    
-    // Лимит награды: максимум 50 баллов
+
+    // Лимит награды: максимум 100 баллов
     const safeReward = Math.min(Math.max(parseInt(reward) || 10, 1), 100);
-    
-    // Проверяем баланс
-    const user = await User.findById(userId).select('balance').lean();
-    if (!user || user.balance < safeReward) {
-      return res.status(400).json({ success: false, message: 'Недостаточно баллов' });
+
+    // Лимит: 1 активный запрос на пользователя
+    const existing = await HelpRequest.findOne({ userId, status: { $in: ['active', 'accepted'] } }).lean();
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'You already have an active help request' });
     }
-    
+
+    // Резервируем баллы атомарно (списываем сразу)
+    const user = await User.findOneAndUpdate(
+      { _id: userId, balance: { $gte: safeReward } },
+      { $inc: { balance: -safeReward } },
+      { new: true }
+    );
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'Insufficient balance' });
+    }
+
     const helpRequest = new HelpRequest({
       userId, location, address, problemType, description,
       reward: safeReward,
       expiresAt: new Date(Date.now() + 60 * 60000)
     });
     await helpRequest.save();
-    
-    // 🔌 WebSocket: новый запрос помощи
+
+    await new Transaction({ userId, type: 'help_reserve', amount: -safeReward, description: `SOS reserve: ${problemType}` }).save();
+
     emitToAll('help:created', { helpRequest: helpRequest.toObject() });
-    
+
     res.json({ success: true, helpRequest });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -3895,22 +3917,18 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Users not found' });
     }
     
-    if (requester.balance < request.reward) {
-      return res.status(400).json({ success: false, message: 'Not enough points' });
-    }
-    
     if (request.userId.toString() === request.helperId.toString()) {
       return res.status(400).json({ success: false, message: 'Cannot help yourself' });
     }
-    
-    // Получаем уровень helper'а для расчёта комиссии
+
+    // Points already reserved (deducted) at creation. Now pay the helper.
     const settings = await getGameSettings();
     let helperLevel = 1;
-    
+
     if (settings && settings.levels) {
       const parkingsGiven = await Parking.countDocuments({ ownerId: request.helperId, status: 'completed' });
       const totalPoints = helper.totalPointsEarned || helper.balance || 0;
-      
+
       for (let i = settings.levels.length - 1; i >= 0; i--) {
         const lvl = settings.levels[i];
         if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
@@ -3919,29 +3937,17 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
         }
       }
     }
-    
-    // Комиссия по уровням: 1=25%, 2=20%, 3=10%, 4=0%
+
     const commissionMap = { 1: 0.25, 2: 0.20, 3: 0.10, 4: 0 };
     const commissionRate = commissionMap[helperLevel] || 0.25;
     const helperEarnings = Math.floor(request.reward * (1 - commissionRate));
-    
-    // Атомарное списание с проверкой баланса
-    const deducted = await User.findOneAndUpdate(
-      { _id: request.userId, balance: { $gte: request.reward } },
-      { $inc: { balance: -request.reward } },
-      { new: true }
-    );
-    if (!deducted) {
-      return res.status(400).json({ success: false, message: 'Not enough points' });
-    }
-    
-    // Атомарное начисление помощнику
-    await User.findByIdAndUpdate(request.helperId, { $inc: { balance: helperEarnings } });
-    
+
+    // Credit helper (points were already deducted from requester at creation)
+    await User.findByIdAndUpdate(request.helperId, { $inc: { balance: helperEarnings, totalPointsEarned: helperEarnings } });
+
     request.status = 'completed';
     await request.save();
-    
-    await Transaction.create({ userId: request.userId, type: 'help_payment', amount: -request.reward, description: 'Help payment' });
+
     await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: helperEarnings, description: 'Help reward' });
     
     // Реферальный пассивный доход
@@ -3990,17 +3996,27 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
 
 app.post('/api/help-requests/:id/cancel', async (req, res) => {
   try {
+    const { userId } = req.body;
     const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
+
+    // Only requester or helper can cancel
+    if (userId && request.userId.toString() !== userId && request.helperId?.toString() !== userId) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
     request.status = 'cancelled';
     await request.save();
-    
-    // 🔌 WebSocket: запрос помощи отменён
+
+    // Refund reserved points to requester
+    await User.findByIdAndUpdate(request.userId, { $inc: { balance: request.reward } });
+    await new Transaction({ userId: request.userId, type: 'help_refund', amount: request.reward, description: `SOS refund: ${request.problemType}` }).save();
+
     emitToAll('help:cancelled', { helpRequestId: request._id.toString() });
     if (request.helperId) {
       emitToUser(request.helperId, 'help:cancelled', { helpRequestId: request._id.toString() });
     }
-    
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false });
@@ -4190,7 +4206,7 @@ app.post('/api/parkings/book', async (req, res) => {
 
     await new Transaction({ userId, type: 'payment', amount: -parking.price, description: `Бронирование: ${parking.address}`, bookingId: booking._id }).save();
     await new Transaction({ userId: parking.ownerId, type: 'earning', amount: ownerEarnings, description: `Заработок: ${parking.address}`, bookingId: booking._id }).save();
-    await new Transaction({ type: 'commission', amount: platformFee, description: `Комиссия: ${parking.address}`, bookingId: booking._id }).save();
+    await new Transaction({ userId: parking.ownerId, type: 'commission', amount: platformFee, description: `Комиссия: ${parking.address}`, bookingId: booking._id }).save();
 
     // Push notification to owner
     if (owner && owner.pushToken) {
@@ -4418,7 +4434,12 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
       console.log(`💸 Refund: booker +${refundAmount}, owner -${ownerEarnings} for parking ${parking.address}`);
     }
 
-    parking.status = 'available';
+    // Restore parking only if not expired
+    if (parking.expiresAt && new Date(parking.expiresAt) > new Date()) {
+      parking.status = 'available';
+    } else {
+      parking.status = 'expired';
+    }
     parking.bookedBy = null;
     parking.bookedAt = null;
     parking.bookerCar = null;
@@ -5883,7 +5904,8 @@ async function createAdminIfNeeded() {
   try {
     let admin = await User.findOne({ email: 'admin@parkbro.com' });
     if (!admin) {
-      const hashedAdminPassword = await bcrypt.hash('admin123', 12);
+      const adminPass = process.env.ADMIN_PASSWORD || 'change_me_' + Date.now();
+      const hashedAdminPassword = await bcrypt.hash(adminPass, 12);
       admin = new User({
         email: 'admin@parkbro.com',
         password: hashedAdminPassword,
@@ -5896,7 +5918,7 @@ async function createAdminIfNeeded() {
         acceptedTerms: true
       });
       await admin.save();
-      console.log('👑 Админ создан: admin@parkbro.com / admin123');
+      console.log('Admin created. Set ADMIN_PASSWORD env var to control the password.');
     }
     console.log('✅ Сервер готов');
   } catch (error) {

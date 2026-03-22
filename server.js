@@ -20,10 +20,10 @@ cloudinary.config({
 async function uploadToCloudinary(base64Image, userId) {
   try {
     if (!base64Image) return null;
-    
+
     // Если уже Cloudinary URL — возвращаем как есть
     if (base64Image.startsWith('https://res.cloudinary.com')) return base64Image;
-    
+
     // Если это Google/Apple URL — загружаем напрямую
     if (base64Image.startsWith('http')) {
       const result = await cloudinary.uploader.upload(base64Image, {
@@ -35,10 +35,10 @@ async function uploadToCloudinary(base64Image, userId) {
       });
       return result.secure_url + '?v=' + Date.now();
     }
-    
+
     // base64 формат
     if (!base64Image.startsWith('data:image')) return null;
-    
+
     const result = await cloudinary.uploader.upload(base64Image, {
       folder: 'parkbro/avatars',
       public_id: `user_${userId}`,
@@ -49,6 +49,22 @@ async function uploadToCloudinary(base64Image, userId) {
     return result.secure_url + '?v=' + Date.now();
   } catch (error) {
     console.log('☁️ Cloudinary upload error:', error.message);
+    return null;
+  }
+}
+
+// Upload chat/forum images — full quality, unique file per image
+async function uploadChatImage(base64Image, userId) {
+  try {
+    if (!base64Image || !base64Image.startsWith('data:image')) return null;
+    const result = await cloudinary.uploader.upload(base64Image, {
+      folder: 'parkbro/chat',
+      public_id: `msg_${userId}_${Date.now()}`,
+      transformation: [{ width: 1600, height: 1600, crop: 'limit', quality: 'auto' }]
+    });
+    return result.secure_url;
+  } catch (error) {
+    console.log('☁️ Chat image upload error:', error.message);
     return null;
   }
 }
@@ -2090,7 +2106,7 @@ app.post('/api/friends/message', async (req, res) => {
     // Загружаем фото в Cloudinary если есть
     let image = null;
     if (imageBase64) {
-      image = await uploadToCloudinary(imageBase64, `msg_${fromUserId}_${Date.now()}`);
+      image = await uploadChatImage(imageBase64, fromUserId);
     }
     
     const message = new FriendMessage({ fromUserId, toUserId, text: text || '', image });
@@ -4903,9 +4919,9 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     let image = null;
     let imageThumb = null;
     if (imageBase64) {
-      image = await uploadToCloudinary(imageBase64, fromUserId);
+      image = await uploadChatImage(imageBase64, fromUserId);
       if (image) {
-        imageThumb = getCloudinaryThumb(image, 300);
+        imageThumb = getCloudinaryThumb(image, 400);
       }
     }
 

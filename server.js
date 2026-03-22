@@ -4918,17 +4918,19 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
       }
     });
     
-    // Push to members
-    const members = await User.find({ _id: { $in: chat.members.filter(id => id.toString() !== fromUserId) } })
-      .select('pushToken language').lean();
-    members.forEach(m => {
-      if (m.pushToken) {
-        sendPushNotification(m.pushToken, 
-          `${chat.name}`, 
-          `${sender?.name || 'User'}: ${text || '📷'}`,
-          { type: 'group_message', chatId: chat._id.toString() });
-      }
-    });
+    // Push to members (skip for forum topics — no push by default)
+    if (!chat.isForum) {
+      const members = await User.find({ _id: { $in: chat.members.filter(id => id.toString() !== fromUserId) } })
+        .select('pushToken language').lean();
+      members.forEach(m => {
+        if (m.pushToken) {
+          sendPushNotification(m.pushToken,
+            `${chat.name}`,
+            `${sender?.name || 'User'}: ${text || '📷'}`,
+            { type: 'group_message', chatId: chat._id.toString() });
+        }
+      });
+    }
     
     res.json({ success: true, message: lastMsg });
   } catch (error) {
@@ -5035,19 +5037,36 @@ app.post('/api/group-chats/:chatId/leave', async (req, res) => {
 // Get all forum topics
 app.get('/api/forum', async (req, res) => {
   try {
+    const reqUserId = req.query.userId;
     const topics = await GroupChat.find({ isForum: true })
       .populate('creatorId', 'name')
+      .populate('members', 'name avatar avatarThumb')
       .lean();
 
-    const result = topics.map(t => ({
-      _id: t._id,
-      name: t.name,
-      creatorId: t.creatorId?._id || t.creatorId,
-      creatorName: t.creatorId?.name || '',
-      messageCount: (t.messages || []).filter(m => !m.deletedForAll).length,
-      members: t.members,
-      createdAt: t.createdAt
-    })).sort((a, b) => b.messageCount - a.messageCount);
+    const result = topics.map(t => {
+      const activeMessages = (t.messages || []).filter(m => !m.deletedForAll);
+      let unreadCount = 0;
+      if (reqUserId) {
+        const readEntry = (t.readBy || []).find(r => r.userId?.toString() === reqUserId);
+        const readAt = readEntry?.readAt || new Date(0);
+        unreadCount = activeMessages.filter(m =>
+          m.fromUserId?.toString() !== reqUserId &&
+          new Date(m.createdAt) > new Date(readAt)
+        ).length;
+      }
+      return {
+        _id: t._id,
+        name: t.name,
+        creatorId: t.creatorId?._id || t.creatorId,
+        creatorName: t.creatorId?.name || '',
+        messageCount: activeMessages.length,
+        unreadCount,
+        members: t.members,
+        membersInfo: t.members,
+        isForum: true,
+        createdAt: t.createdAt
+      };
+    }).sort((a, b) => b.messageCount - a.messageCount);
 
     res.json(result);
   } catch (error) {

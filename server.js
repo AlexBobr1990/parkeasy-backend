@@ -23,9 +23,18 @@ function optionalAuth(req, res, next) {
   if (auth && auth.startsWith('Bearer ')) {
     try {
       const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
+      // Reject refresh tokens used as access tokens
+      if (decoded.type === 'refresh') { return next(); }
       req.authUserId = decoded.userId;
     } catch (e) {
       // Expired or invalid token — still allow (transitional)
+    }
+  }
+  // If authenticated, verify userId in body/query matches token
+  if (req.authUserId) {
+    const bodyUserId = req.body?.userId || req.body?.fromUserId || req.body?.creatorId || req.query?.userId;
+    if (bodyUserId && bodyUserId !== req.authUserId) {
+      return res.status(403).json({ success: false, message: 'User ID mismatch' });
     }
   }
   next();
@@ -307,6 +316,9 @@ const userSockets = new Map();
 
 io.on('connection', async (socket) => {
   const userId = socket.handshake.auth?.userId || socket.handshake.query?.userId;
+
+  // Reject connections without userId
+  if (!userId) { socket.disconnect(true); return; }
 
   if (userId) {
     // Validate userId exists in DB
@@ -1187,6 +1199,14 @@ setInterval(async () => {
     if (totalExpired > 0) {
       emitToAll('parking:expired', { count: totalExpired });
       emitToAll('parkings:refresh', {});
+    }
+    // Auto-expire and refund stale SOS help requests
+    const staleHelp = await HelpRequest.find({ status: { $in: ['active', 'accepted'] }, expiresAt: { $lte: new Date() } });
+    for (const h of staleHelp) {
+      h.status = 'expired';
+      await h.save();
+      await User.findByIdAndUpdate(h.userId, { $inc: { balance: h.reward } });
+      await new Transaction({ userId: h.userId, type: 'help_refund', amount: h.reward, description: `SOS expired refund: ${h.problemType}` }).save();
     }
   } catch (error) {
     console.log("Timer check error:", error);
@@ -3731,12 +3751,13 @@ app.post('/api/help-requests/create', async (req, res) => {
     if (existing) {
       return res.status(400).json({ success: false, message: 'You already have an active help request' });
     }
-    // Auto-expire and refund any stale requests
+    // Auto-expire and refund any stale requests (backup — timer handles most cases)
     const stale = await HelpRequest.find({ userId, status: { $in: ['active', 'accepted'] }, expiresAt: { $lte: new Date() } });
     for (const s of stale) {
       s.status = 'expired';
       await s.save();
       await User.findByIdAndUpdate(userId, { $inc: { balance: s.reward } });
+      await new Transaction({ userId, type: 'help_refund', amount: s.reward, description: `SOS expired refund: ${s.problemType}` }).save();
     }
 
     // Резервируем баллы атомарно (списываем сразу)
@@ -4255,7 +4276,7 @@ app.post('/api/parkings/book', async (req, res) => {
     // Начисляем владельцу атомарно и получаем только нужные поля
     const owner = await User.findByIdAndUpdate(
       parking.ownerId,
-      { $inc: { balance: ownerEarnings } },
+      { $inc: { balance: ownerEarnings, totalPointsEarned: ownerEarnings } },
       { new: true, projection: { name: 1, car: 1, avatarThumb: 1, rating: 1, pushToken: 1, language: 1 } }
     );
     

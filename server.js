@@ -558,7 +558,16 @@ const userSchema = new mongoose.Schema({
   
   // Друзья и приватность
   hideOnline: { type: Boolean, default: false },
-  
+
+  // Nearby parking notifications
+  nearbyParkingEnabled: { type: Boolean, default: false },
+  nearbyParkingRadius: { type: Number, default: 300 }, // meters
+  homeLocation: { lat: Number, lng: Number },
+  workLocation: { lat: Number, lng: Number },
+  quietHoursStart: { type: Number, default: 23 }, // 0-23
+  quietHoursEnd: { type: Number, default: 7 },   // 0-23
+  lastNearbyPush: { type: Date },
+
   // Статистика
   parkingsGiven: { type: Number, default: 0 },
   parkingsReceived: { type: Number, default: 0 },
@@ -995,6 +1004,100 @@ function haversineKm(lat1, lng1, lat2, lng2) {
             Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
             Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ==================== NEARBY PARKING NOTIFICATIONS ====================
+
+async function notifyNearbyUsersAboutParking(parking, ownerId) {
+  try {
+    const now = new Date();
+    const currentHour = now.getHours();
+
+    // Find users with nearby notifications enabled, with push token, excluding owner
+    const candidates = await User.find({
+      _id: { $ne: ownerId },
+      nearbyParkingEnabled: true,
+      pushToken: { $exists: true, $ne: null },
+      lastLocation: { $exists: true },
+      'lastLocation.lat': { $exists: true },
+    }).select('pushToken lastLocation lastActivity language car nearbyParkingRadius homeLocation workLocation quietHoursStart quietHoursEnd lastNearbyPush').lean();
+
+    let notified = 0;
+
+    for (const u of candidates) {
+      // 1. Quiet hours check
+      const qStart = u.quietHoursStart ?? 23;
+      const qEnd = u.quietHoursEnd ?? 7;
+      if (qStart > qEnd) {
+        // e.g. 23-7: quiet if hour >= 23 OR hour < 7
+        if (currentHour >= qStart || currentHour < qEnd) continue;
+      } else if (qStart < qEnd) {
+        if (currentHour >= qStart && currentHour < qEnd) continue;
+      }
+
+      // 2. Rate limit: max 1 push per 5 minutes
+      if (u.lastNearbyPush && (now - new Date(u.lastNearbyPush)) < 5 * 60 * 1000) continue;
+
+      // 3. Check if user has active parking or booking (skip them)
+      const hasActive = await Parking.exists({
+        $or: [
+          { ownerId: u._id, status: { $in: ['available', 'booked'] } },
+          { bookedBy: u._id, status: 'booked' }
+        ]
+      });
+      if (hasActive) continue;
+
+      // 4. Check if user has active SOS
+      const hasSOS = await HelpRequest.exists({ userId: u._id, status: { $in: ['active', 'accepted'] } });
+      if (hasSOS) continue;
+
+      // 5. Distance check
+      const radius = (u.nearbyParkingRadius || 300) / 1000; // convert meters to km
+      const dist = haversineKm(u.lastLocation.lat, u.lastLocation.lng, parking.location.lat, parking.location.lng);
+      if (dist > radius) continue;
+
+      // 6. Activity check: if user inactive > 30 min AND not near home/work - skip
+      const inactiveMins = (now - new Date(u.lastActivity)) / 60000;
+      const isNearHome = u.homeLocation ? haversineKm(u.lastLocation.lat, u.lastLocation.lng, u.homeLocation.lat, u.homeLocation.lng) < 0.2 : false;
+      const isNearWork = u.workLocation ? haversineKm(u.lastLocation.lat, u.lastLocation.lng, u.workLocation.lat, u.workLocation.lng) < 0.2 : false;
+      if (inactiveMins > 30 && !isNearHome && !isNearWork) continue;
+
+      // 7. Car size compatibility
+      if (u.car?.size && parking.ownerCar?.size) {
+        const sizeOrder = { compact: 1, sedan: 2, suv: 3, truck: 4 };
+        const userSize = sizeOrder[u.car.size] || 2;
+        const spotSize = sizeOrder[parking.ownerCar.size] || 2;
+        // User's car bigger than spot - skip
+        if (userSize > spotSize + 1) continue;
+      }
+
+      // All checks passed - send push
+      const distMeters = Math.round(dist * 1000);
+      const lang = u.language || 'en';
+      const titles = { en: 'Parking nearby!', ru: 'Парковка рядом!', es: 'Estacionamiento cerca!', uk: 'Парковка поруч!' };
+      const bodies = {
+        en: `${distMeters}m - ${parking.address} (${parking.price} pts, ${parking.timeToLeave} min)`,
+        ru: `${distMeters}м - ${parking.address} (${parking.price} б., ${parking.timeToLeave} мин)`,
+        es: `${distMeters}m - ${parking.address} (${parking.price} pts, ${parking.timeToLeave} min)`,
+        uk: `${distMeters}м - ${parking.address} (${parking.price} б., ${parking.timeToLeave} хв)`,
+      };
+
+      await sendPushNotification(u.pushToken, titles[lang] || titles.en, bodies[lang] || bodies.en, {
+        type: 'nearby_parking',
+        parkingId: parking._id.toString(),
+        lat: parking.location.lat,
+        lng: parking.location.lng
+      });
+
+      // Update rate limit timestamp
+      await User.updateOne({ _id: u._id }, { lastNearbyPush: now });
+      notified++;
+    }
+
+    if (notified > 0) console.log(`Nearby parking push sent to ${notified} users`);
+  } catch (err) {
+    console.log('Nearby parking notify error:', err.message);
+  }
 }
 
 // ==================== HELPERS ====================
@@ -3648,6 +3751,12 @@ app.put("/api/users/:id", async (req, res) => {
     if (language) user.language = language;
     if (req.body.lastLocation) user.lastLocation = req.body.lastLocation;
     if (req.body.muteDailyPush !== undefined) user.muteDailyPush = req.body.muteDailyPush;
+    if (req.body.nearbyParkingEnabled !== undefined) user.nearbyParkingEnabled = req.body.nearbyParkingEnabled;
+    if (req.body.nearbyParkingRadius !== undefined) user.nearbyParkingRadius = Math.min(Math.max(parseInt(req.body.nearbyParkingRadius) || 300, 100), 2000);
+    if (req.body.homeLocation) user.homeLocation = req.body.homeLocation;
+    if (req.body.workLocation) user.workLocation = req.body.workLocation;
+    if (req.body.quietHoursStart !== undefined) user.quietHoursStart = req.body.quietHoursStart;
+    if (req.body.quietHoursEnd !== undefined) user.quietHoursEnd = req.body.quietHoursEnd;
     // НЕ разрешаем: balance, isAdmin, email, password, referralCode, etc.
     await user.save();
     
@@ -4180,7 +4289,10 @@ app.post('/api/parkings/create', async (req, res) => {
     
     // 🔌 WebSocket: уведомляем всех о новой парковке
     emitToAll('parking:created', { parking: newParking });
-    
+
+    // Push nearby users (async, don't block response)
+    notifyNearbyUsersAboutParking(newParking, ownerId).catch(() => {});
+
     res.json({ success: true, message: 'Парковка создана!', parking: newParking });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);

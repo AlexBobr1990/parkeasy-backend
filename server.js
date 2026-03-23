@@ -3799,6 +3799,7 @@ app.post('/api/help-requests/:id/accept', async (req, res) => {
     }
     request.status = 'accepted';
     request.helperId = helperId;
+    request.expiresAt = new Date(Date.now() + 2 * 60 * 60000); // Extend to 2 hours when accepted
     await request.save();
     
     // 🔌 WebSocket: запрос помощи принят

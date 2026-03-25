@@ -1115,7 +1115,7 @@ async function creditReferralPassive(userId, description) {
     });
     if (todayCount >= 5) return;
 
-    await User.findByIdAndUpdate(user.referredBy, { $inc: { balance: 1, referralEarnings: 1 } });
+    await User.findByIdAndUpdate(user.referredBy, { $inc: { balance: 1, referralEarnings: 1, totalPointsEarned: 1 } });
     await new Transaction({ userId: user.referredBy, type: 'referral_passive', amount: 1, description: `Referral ${user.name}: ${description}` }).save();
   } catch (err) {
     console.log('Referral passive error:', err.message);
@@ -6156,60 +6156,54 @@ const getYesterdayDate = () => {
 
 // Получить уровень пользователя
 app.get('/api/users/:id/level', async (req, res) => {
-  const t0 = Date.now();
   try {
     const user = await User.findById(req.params.id).select('totalPointsEarned balance').lean();
-    console.log(`  [level] User.findById: ${Date.now() - t0}ms`);
     if (!user) return res.json({ level: 1, progress: 0 });
-    
-    const t1 = Date.now();
+
     const settings = await getGameSettings();
-    console.log(`  [level] getGameSettings: ${Date.now() - t1}ms`);
     if (!settings || !settings.levels) {
       return res.json({ level: 1, name: { en: 'Newbie', ru: 'Новичок' }, icon: '🚗', progress: 0 });
     }
-    
-    const t2 = Date.now();
-    const parkingsGiven = await Parking.countDocuments({ ownerId: req.params.id, status: 'completed' });
-    console.log(`  [level] Parking.countDocuments: ${Date.now() - t2}ms`);
-    console.log(`  [level] TOTAL: ${Date.now() - t0}ms`);
-    const totalPoints = user.totalPointsEarned || user.balance || 0;
-    
+
+    // Fix: use totalPointsEarned only, never fallback to balance (balance decreases on spend)
+    // If totalPointsEarned is 0 but balance > 0, backfill it once
+    let totalPoints = user.totalPointsEarned || 0;
+    if (totalPoints === 0 && user.balance > 0) {
+      totalPoints = user.balance;
+      await User.findByIdAndUpdate(req.params.id, { $set: { totalPointsEarned: user.balance } });
+    }
+
     let currentLevel = settings.levels[0];
     let nextLevel = settings.levels[1];
-    
+
+    // Level based on XP only (minParkingsGiven ignored for simpler UX)
     for (let i = settings.levels.length - 1; i >= 0; i--) {
       const lvl = settings.levels[i];
-      if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+      if (totalPoints >= lvl.minPoints) {
         currentLevel = lvl;
         nextLevel = settings.levels[i + 1] || null;
         break;
       }
     }
-    
+
     let progress = 100;
     if (nextLevel) {
-      const pointsProgress = (totalPoints - currentLevel.minPoints) / (nextLevel.minPoints - currentLevel.minPoints);
-      const parkingsProgress = (parkingsGiven - currentLevel.minParkingsGiven) / (nextLevel.minParkingsGiven - currentLevel.minParkingsGiven);
-      progress = Math.min(Math.floor(Math.min(pointsProgress, parkingsProgress) * 100), 99);
+      const pointsRange = nextLevel.minPoints - currentLevel.minPoints;
+      progress = Math.min(Math.floor(((totalPoints - currentLevel.minPoints) / pointsRange) * 100), 99);
     }
-    
+
     res.json({
       level: currentLevel.level,
       name: currentLevel.name,
       icon: currentLevel.icon,
       progress,
       totalPoints,
-      parkingsGiven,
-      // Данные для следующего уровня
       nextLevel: nextLevel ? {
         level: nextLevel.level,
         name: nextLevel.name,
         icon: nextLevel.icon,
         minPoints: nextLevel.minPoints,
-        minParkingsGiven: nextLevel.minParkingsGiven,
-        pointsNeeded: nextLevel.minPoints - totalPoints,
-        parkingsNeeded: nextLevel.minParkingsGiven - parkingsGiven
+        pointsNeeded: Math.max(0, nextLevel.minPoints - totalPoints)
       } : null
     });
   } catch (error) {

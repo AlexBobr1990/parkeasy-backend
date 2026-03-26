@@ -8,7 +8,8 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'parkbro-jwt-secret-2025-xK9m';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) { console.error('FATAL: JWT_SECRET not set!'); process.exit(1); }
 const JWT_EXPIRES = '30d'; // 30 days
 
 function generateTokens(userId) {
@@ -458,7 +459,11 @@ const adminAuth = async (req, res, next) => {
 
 // Применяем ко всем /api/admin/* маршрутам
 app.use('/api/admin', adminAuth);
-app.use('/api', optionalAuth); // JWT auth on all /api routes (transitional — allows unauthenticated)
+// JWT auth required on all /api routes except auth endpoints
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next();
+  return requireAuth(req, res, next);
+});
 
 // ==================== REQUEST COUNTER ====================
 let requestLog = [];
@@ -496,8 +501,8 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
-if (!process.env.MONGODB_URI) console.warn('WARNING: MONGODB_URI not set, using fallback. Set it in Railway env vars!');
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error('FATAL: MONGODB_URI not set!'); process.exit(1); }
 const PORT = process.env.PORT || 3001;
 
 // ==================== SCHEMAS ====================
@@ -2376,6 +2381,21 @@ app.post('/api/friends/mark-read', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.log("MARK READ ERROR:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Delete friend message (only sender can delete)
+app.delete('/api/friends/message/:messageId', async (req, res) => {
+  try {
+    const message = await FriendMessage.findById(req.params.messageId);
+    if (!message) return res.status(404).json({ success: false });
+    if (message.fromUserId.toString() !== req.authUserId) {
+      return res.status(403).json({ success: false, message: 'Not your message' });
+    }
+    await FriendMessage.findByIdAndDelete(req.params.messageId);
+    res.json({ success: true });
+  } catch (error) {
     res.status(500).json({ success: false });
   }
 });
@@ -5134,8 +5154,26 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
 
+    // Check if sender is blocked by any member (for non-forum chats)
+    if (!chat.isForum) {
+      const blocked = await BlockedUser.findOne({
+        $or: chat.members.filter(m => m.toString() !== fromUserId).map(m => ({
+          userId: m, blockedUserId: fromUserId
+        }))
+      });
+      if (blocked) return res.status(403).json({ success: false, message: 'Blocked' });
+    }
+
     // Auto-add user to forum members
     if (chat.isForum && !chat.members.some(m => m.toString() === fromUserId)) {
+      // Check if sender is blocked by forum creator
+      const forumBlocked = await BlockedUser.findOne({
+        $or: [
+          { userId: chat.creatorId, blockedUserId: fromUserId },
+          { userId: fromUserId, blockedUserId: chat.creatorId }
+        ]
+      });
+      if (forumBlocked) return res.status(403).json({ success: false, message: 'Blocked' });
       chat.members.push(fromUserId);
     }
 

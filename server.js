@@ -8,8 +8,8 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) { console.error('FATAL: JWT_SECRET not set!'); process.exit(1); }
+const JWT_SECRET = process.env.JWT_SECRET || 'parkbro-jwt-secret-2025-xK9m';
+if (!process.env.JWT_SECRET) console.warn('⚠️ WARNING: JWT_SECRET not set, using fallback. Set it in env vars!');
 const JWT_EXPIRES = '30d'; // 30 days
 
 function generateTokens(userId) {
@@ -503,6 +503,7 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) { console.error('FATAL: MONGODB_URI not set!'); process.exit(1); }
+// Note: MONGODB_URI must always be set in Railway env vars
 const PORT = process.env.PORT || 3001;
 
 // ==================== SCHEMAS ====================

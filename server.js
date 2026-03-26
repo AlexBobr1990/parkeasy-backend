@@ -4332,7 +4332,7 @@ app.post('/api/parkings/book', async (req, res) => {
 
     // ✅ АТОМАРНАЯ ОПЕРАЦИЯ: бронируем только если status === 'available'
     const parking = await Parking.findOneAndUpdate(
-      { _id: parkingId, status: 'available' },  // Условие: только если available
+      { _id: parkingId, status: 'available', expiresAt: { $gt: new Date() } },  // available + not expired
       { 
         status: 'booked',
         bookedBy: userId,
@@ -4608,7 +4608,7 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
     if (booking && bookerId) {
       const refundAmount = booking.price || parking.price;
-      const ownerEarnings = booking.ownerEarnings || Math.floor(refundAmount * 0.75);
+      const ownerEarnings = booking.ownerEarnings != null ? booking.ownerEarnings : Math.floor(refundAmount * 0.75);
       
       // Возвращаем баллы бронирующему
       await User.findByIdAndUpdate(bookerId, { $inc: { balance: refundAmount } });
@@ -4683,7 +4683,7 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
       const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
       if (booking) {
         const refundAmount = booking.price || parking.price;
-        const ownerEarnings = booking.ownerEarnings || Math.floor(refundAmount * 0.75);
+        const ownerEarnings = booking.ownerEarnings != null ? booking.ownerEarnings : Math.floor(refundAmount * 0.75);
         
         await User.findByIdAndUpdate(parking.bookedBy, { $inc: { balance: refundAmount } });
         await new Transaction({ userId: parking.bookedBy.toString(), type: 'cancellation', amount: refundAmount, description: `Возврат (владелец отменил): ${parking.address}` }).save();
@@ -6335,13 +6335,17 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
       console.log('ERROR: Already claimed');
       return res.json({ success: false, reason: 'already_claimed' });
     }
-    
+
     const config = await DailyTaskConfig.findOne({ code: taskCode });
     const reward = config?.reward || 10;
-    
-    task.rewardClaimed = true;
-    progress.markModified('tasks');
-    await progress.save();
+
+    // Atomic claim: only update if not already claimed (prevents race condition)
+    const claimed = await DailyProgress.findOneAndUpdate(
+      { _id: progress._id, 'tasks.code': taskCode, 'tasks.rewardClaimed': false },
+      { $set: { 'tasks.$.rewardClaimed': true } },
+      { new: true }
+    );
+    if (!claimed) return res.json({ success: false, reason: 'already_claimed' });
     
     const user = await User.findByIdAndUpdate(userId, { $inc: { balance: reward, totalPointsEarned: reward } }, { new: true });
     
@@ -6420,17 +6424,21 @@ app.post('/api/users/:id/streak/claim/:day', async (req, res) => {
     
     const dayNum = parseInt(day);
     
-    const streak = await UserStreak.findOne({ userId });
-    if (!streak || streak.currentStreak < dayNum) return res.json({ success: false });
-    if (streak.claimedBonuses?.includes(dayNum)) return res.json({ success: false });
-    
+    const streakCheck = await UserStreak.findOne({ userId });
+    if (!streakCheck || streakCheck.currentStreak < dayNum) return res.json({ success: false });
+    if (streakCheck.claimedBonuses?.includes(dayNum)) return res.json({ success: false });
+
     const settings = await getGameSettings();
     const bonusConfig = settings?.streakBonuses?.find(b => b.day === dayNum);
     if (!bonusConfig) return res.json({ success: false });
-    
-    streak.claimedBonuses = streak.claimedBonuses || [];
-    streak.claimedBonuses.push(dayNum);
-    await streak.save();
+
+    // Atomic claim: only update if dayNum not already in claimedBonuses (prevents race condition)
+    const streak = await UserStreak.findOneAndUpdate(
+      { userId, claimedBonuses: { $ne: dayNum } },
+      { $addToSet: { claimedBonuses: dayNum } },
+      { new: true }
+    );
+    if (!streak) return res.json({ success: false });
     
     const user = await User.findByIdAndUpdate(userId, { $inc: { balance: bonusConfig.bonus, totalPointsEarned: bonusConfig.bonus } }, { new: true });
     

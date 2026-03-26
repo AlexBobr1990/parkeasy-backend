@@ -461,7 +461,8 @@ const adminAuth = async (req, res, next) => {
 app.use('/api/admin', adminAuth);
 // JWT auth required on all /api routes except public endpoints
 app.use('/api', (req, res, next) => {
-  if (req.path.startsWith('/auth/') || req.path.startsWith('/referral/')) return next();
+  const publicPaths = ['/auth/', '/referral/', '/tickets/', '/settings/', '/parkings/nearby', '/stats'];
+  if (publicPaths.some(p => req.path.startsWith(p))) return next();
   return requireAuth(req, res, next);
 });
 
@@ -1733,6 +1734,7 @@ app.post('/api/auth/verify-email', rateLimit('verify-email', 10, 900000), async 
         });
         if (todayReferrals < 10) {
           referrer.balance += 20;
+          referrer.totalPointsEarned = (referrer.totalPointsEarned || 0) + 20;
           referrer.referralCount += 1;
           referrer.referralEarnings = (referrer.referralEarnings || 0) + 20;
           await referrer.save();
@@ -3421,10 +3423,11 @@ app.post('/api/auth/google', rateLimit('google-auth', 10, 900000), async (req, r
           const todayReferrals = await Transaction.countDocuments({ userId: referrer._id, type: 'referral', createdAt: { $gte: todayStart } });
           if (todayReferrals < 10) {
             referrer.balance += 20;
+            referrer.totalPointsEarned = (referrer.totalPointsEarned || 0) + 20;
             referrer.referralCount += 1;
             referrer.referralEarnings += 20;
             await referrer.save();
-            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Реферальный бонус за ${user.name}` }).save();
+            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Referral bonus for ${user.name}` }).save();
             console.log(`✅ Referral bonus +20 to ${referrer.name} for Google user ${user.name}`);
           }
         }
@@ -3536,10 +3539,11 @@ app.post('/api/auth/apple', rateLimit('apple-auth', 10, 900000), async (req, res
           const todayReferrals = await Transaction.countDocuments({ userId: referrer._id, type: 'referral', createdAt: { $gte: todayStart } });
           if (todayReferrals < 10) {
             referrer.balance += 20;
+            referrer.totalPointsEarned = (referrer.totalPointsEarned || 0) + 20;
             referrer.referralCount += 1;
             referrer.referralEarnings += 20;
             await referrer.save();
-            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Реферальный бонус за ${user.name}` }).save();
+            await new Transaction({ userId: referrer._id, type: 'referral', amount: 20, description: `Referral bonus for ${user.name}` }).save();
             console.log(`✅ Referral bonus +20 to ${referrer.name} for Apple user ${user.name}`);
           }
         }
@@ -6375,7 +6379,7 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
     const reward = config?.reward || 10;
 
     // Atomic claim: only update if not already claimed (prevents race condition)
-    const claimed = await DailyProgress.findOneAndUpdate(
+    const claimed = await UserDailyProgress.findOneAndUpdate(
       { _id: progress._id, 'tasks.code': taskCode, 'tasks.rewardClaimed': false },
       { $set: { 'tasks.$.rewardClaimed': true } },
       { new: true }

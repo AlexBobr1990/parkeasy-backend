@@ -4147,12 +4147,10 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     let helperLevel = 1;
 
     if (settings && settings.levels) {
-      const parkingsGiven = await Parking.countDocuments({ ownerId: request.helperId, status: 'completed' });
-      const totalPoints = helper.totalPointsEarned || helper.balance || 0;
-
+      const totalPoints = helper.totalPointsEarned || 0;
       for (let i = settings.levels.length - 1; i >= 0; i--) {
         const lvl = settings.levels[i];
-        if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+        if (totalPoints >= lvl.minPoints) {
           helperLevel = lvl.level;
           break;
         }
@@ -4389,12 +4387,10 @@ app.post('/api/parkings/book', async (req, res) => {
     let ownerLevel = 1;
     
     if (settings && settings.levels && ownerData) {
-      const parkingsGiven = await Parking.countDocuments({ ownerId: parking.ownerId, status: 'completed' });
-      const totalPoints = ownerData.totalPointsEarned || ownerData.balance || 0;
-      
+      const totalPoints = ownerData.totalPointsEarned || 0;
       for (let i = settings.levels.length - 1; i >= 0; i--) {
         const lvl = settings.levels[i];
-        if (totalPoints >= lvl.minPoints && parkingsGiven >= lvl.minParkingsGiven) {
+        if (totalPoints >= lvl.minPoints) {
           ownerLevel = lvl.level;
           break;
         }

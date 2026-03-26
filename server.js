@@ -459,9 +459,9 @@ const adminAuth = async (req, res, next) => {
 
 // Применяем ко всем /api/admin/* маршрутам
 app.use('/api/admin', adminAuth);
-// JWT auth required on all /api routes except auth endpoints
+// JWT auth required on all /api routes except public endpoints
 app.use('/api', (req, res, next) => {
-  if (req.path.startsWith('/auth/')) return next();
+  if (req.path.startsWith('/auth/') || req.path.startsWith('/referral/')) return next();
   return requireAuth(req, res, next);
 });
 

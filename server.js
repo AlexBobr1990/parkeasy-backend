@@ -461,7 +461,7 @@ const adminAuth = async (req, res, next) => {
 app.use('/api/admin', adminAuth);
 // JWT auth required on all /api routes except public endpoints
 app.use('/api', (req, res, next) => {
-  const publicPaths = ['/auth/', '/referral/', '/tickets/', '/settings/', '/parkings/nearby', '/stats'];
+  const publicPaths = ['/auth/', '/referral/', '/tickets/', '/settings/', '/parkings/nearby', '/stats', '/upload-product-image'];
   if (publicPaths.some(p => req.path.startsWith(p))) return next();
   return requireAuth(req, res, next);
 });
@@ -506,6 +506,9 @@ const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) { console.error('FATAL: MONGODB_URI not set!'); process.exit(1); }
 // Note: MONGODB_URI must always be set in Railway env vars
 const PORT = process.env.PORT || 3001;
+
+// ==================== TRANSLATION ====================
+const GOOGLE_TRANSLATE_KEY = process.env.GOOGLE_TRANSLATE_KEY || '';
 
 // ==================== SCHEMAS ====================
 
@@ -655,7 +658,7 @@ const bookingSchema = new mongoose.Schema({
 
 const transactionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'referral_passive', 'help_payment', 'help_reward', 'help_reserve', 'help_refund', 'daily_task', 'streak_bonus', 'achievement'], required: true },
+  type: { type: String, enum: ['deposit', 'payment', 'earning', 'bonus', 'commission', 'cancellation', 'penalty', 'referral', 'referral_passive', 'help_payment', 'help_reward', 'help_reserve', 'help_refund', 'daily_task', 'streak_bonus', 'achievement', 'store_review'], required: true },
   amount: { type: Number, required: true },
   description: { type: String, required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -981,6 +984,17 @@ const groupChatSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const GroupChat = mongoose.model('GroupChat', groupChatSchema);
+
+// Translation cache
+const translationCacheSchema = new mongoose.Schema({
+  hash: { type: String, required: true, unique: true, index: true },
+  source: String,
+  target: String,
+  original: String,
+  translated: String,
+  createdAt: { type: Date, default: Date.now, expires: 60 * 60 * 24 * 30 } // 30 days TTL
+});
+const TranslationCache = mongoose.model('TranslationCache', translationCacheSchema);
 
 // Кэш для AppSettings
 let cachedAppSettings = null;
@@ -1843,6 +1857,69 @@ app.post("/api/auth/reset-password", rateLimit('reset-pw', 10, 900000), async (r
     console.log("CREATE PARKING ERROR:", error);
     console.log("Reset password error:", error);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ==================== TRANSLATE ====================
+app.post('/api/translate', async (req, res) => {
+  try {
+    const { text, target } = req.body;
+    if (!text || !target) return res.json({ success: false });
+    if (!GOOGLE_TRANSLATE_KEY) return res.json({ success: false, message: 'Translation not configured' });
+
+    const trimmed = text.slice(0, 2000);
+    const crypto = require('crypto');
+    const hash = crypto.createHash('md5').update(trimmed + target).digest('hex');
+
+    // Check cache
+    const cached = await TranslationCache.findOne({ hash });
+    if (cached) return res.json({ success: true, translated: cached.translated, source: cached.source });
+
+    // Call Google Translate
+    const url = `https://translation.googleapis.com/language/translate/v2?key=${GOOGLE_TRANSLATE_KEY}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: trimmed, target, format: 'text' })
+    });
+    const data = await response.json();
+
+    if (!data.data?.translations?.[0]) {
+      return res.json({ success: false, message: 'Translation failed' });
+    }
+
+    const result = data.data.translations[0];
+    const translated = result.translatedText;
+    const source = result.detectedSourceLanguage || 'unknown';
+
+    // Save to cache
+    await TranslationCache.findOneAndUpdate(
+      { hash },
+      { hash, source, target, original: trimmed, translated },
+      { upsert: true }
+    );
+
+    res.json({ success: true, translated, source });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
+
+// ==================== PRODUCT IMAGE PROXY ====================
+// Upload product image URL to Cloudinary
+app.post('/api/upload-product-image', async (req, res) => {
+  try {
+    const { imageUrl, asin } = req.body;
+    if (!imageUrl || !asin) return res.json({ success: false });
+    const result = await cloudinary.uploader.upload(imageUrl, {
+      folder: 'parkbro/store',
+      public_id: `product_${asin}`,
+      overwrite: true,
+      transformation: [{ width: 600, height: 600, crop: 'pad', background: 'white', quality: 'auto' }]
+    });
+    res.json({ success: true, cloudinaryUrl: result.secure_url });
+  } catch (error) {
+    res.json({ success: false, message: error.message });
   }
 });
 
@@ -4441,7 +4518,7 @@ app.post('/api/parkings/book', async (req, res) => {
     }
 
     // 🔌 WebSocket: уведомляем всех что парковка забронирована
-    emitToAll('parking:booked', { parkingId: parking._id.toString() });
+    emitToAll('parking:booked', { parkingId: parking._id.toString(), ownerId: parking.ownerId.toString(), bookedBy: userId });
     // Владельцу — детали бронирования (событие booking:new)
     emitToUser(parking.ownerId, 'booking:new', { parking: parking.toObject(), bookingId: booking._id });
     // Букеру — обновление баланса

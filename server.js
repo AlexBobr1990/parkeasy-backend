@@ -3855,8 +3855,8 @@ app.put("/api/users/:id", async (req, res) => {
     if (req.body.muteDailyPush !== undefined) user.muteDailyPush = req.body.muteDailyPush;
     if (req.body.nearbyParkingEnabled !== undefined) user.nearbyParkingEnabled = req.body.nearbyParkingEnabled;
     if (req.body.nearbyParkingRadius !== undefined) user.nearbyParkingRadius = Math.min(Math.max(parseInt(req.body.nearbyParkingRadius) || 300, 100), 2000);
-    if (req.body.homeLocation) user.homeLocation = req.body.homeLocation;
-    if (req.body.workLocation) user.workLocation = req.body.workLocation;
+    if (req.body.homeLocation !== undefined) user.homeLocation = req.body.homeLocation;
+    if (req.body.workLocation !== undefined) user.workLocation = req.body.workLocation;
     if (req.body.quietHoursStart !== undefined) user.quietHoursStart = req.body.quietHoursStart;
     if (req.body.quietHoursEnd !== undefined) user.quietHoursEnd = req.body.quietHoursEnd;
     // НЕ разрешаем: balance, isAdmin, email, password, referralCode, etc.

@@ -6382,21 +6382,22 @@ app.get('/api/users/:id/daily-tasks', async (req, res) => {
       }
     }
     
-    const taskConfigs = await DailyTaskConfig.find({ isActive: true });
+    const taskConfigs = await DailyTaskConfig.find({ isActive: true }).sort({ code: 1 });
     const settings = await getGameSettings();
-    
-    const tasks = progress.tasks.map(t => {
-      const config = taskConfigs.find(c => c.code === t.code);
+
+    // Build tasks from configs (stable order) and match with progress
+    const tasks = taskConfigs.map(config => {
+      const t = progress.tasks.find(pt => pt.code === config.code);
       return {
-        code: t.code,
-        icon: config?.icon || '📋',
-        name: config?.name,
-        type: config?.type,
-        targetValue: config?.targetValue || 1,
-        currentValue: t.currentValue,
-        completed: t.completed,
-        rewardClaimed: t.rewardClaimed,
-        reward: config?.reward || 10
+        code: config.code,
+        icon: config.icon || '📋',
+        name: config.name,
+        type: config.type,
+        targetValue: config.targetValue || 1,
+        currentValue: t?.currentValue || 0,
+        completed: t?.completed || false,
+        rewardClaimed: t?.rewardClaimed || false,
+        reward: config.reward || 10
       };
     });
     

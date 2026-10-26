@@ -15,7 +15,8 @@
 
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error("Set MONGODB_URI before running this script"); process.exit(1); }
 const OFFSET_METERS = 4;
 const DRY_RUN = process.argv.includes('--dry-run');
 

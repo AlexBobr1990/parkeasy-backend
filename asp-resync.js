@@ -20,7 +20,8 @@ const mongoose = require('mongoose');
 const proj4 = require('proj4');
 
 // ============ CONFIG ============
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error("Set MONGODB_URI before running this script"); process.exit(1); }
 const NYC_API = 'https://data.cityofnewyork.us/resource/nfid-uabd.json';
 const PAGE_SIZE = 50000;
 const DRY_RUN = process.argv.includes('--dry-run');

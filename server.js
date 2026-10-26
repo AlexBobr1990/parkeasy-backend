@@ -8,8 +8,8 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'parkbro-jwt-secret-2025-xK9m';
-if (!process.env.JWT_SECRET) console.warn('⚠️ WARNING: JWT_SECRET not set, using fallback. Set it in env vars!');
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) { console.error("FATAL: JWT_SECRET is not set"); process.exit(1); }
 const JWT_EXPIRES = '30d'; // 30 days
 
 function generateTokens(userId) {
@@ -6366,7 +6366,8 @@ async function createAdminIfNeeded() {
   try {
     let admin = await User.findOne({ email: 'admin@parkbro.com' });
     if (!admin) {
-      const adminPass = process.env.ADMIN_PASSWORD || 'change_me_' + Date.now();
+      // Without ADMIN_PASSWORD the account gets an unguessable password (reset it via the forgot-password flow)
+      const adminPass = process.env.ADMIN_PASSWORD || crypto.randomBytes(24).toString("base64url");
       const hashedAdminPassword = await bcrypt.hash(adminPass, 12);
       admin = new User({
         email: 'admin@parkbro.com',

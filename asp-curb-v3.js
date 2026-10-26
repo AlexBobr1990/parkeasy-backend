@@ -21,7 +21,8 @@
 
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error("Set MONGODB_URI before running this script"); process.exit(1); }
 const CURB_MIN_M = 2;    // минимум от центра дороги до линии (м)
 const CURB_MAX_M = 12;   // максимум (защита от аномалий)
 const CURB_DEFAULT_M = 5; // если измерение не удалось

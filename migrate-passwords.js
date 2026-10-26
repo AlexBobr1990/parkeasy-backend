@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
-mongoose.connect('mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp')
+mongoose.connect(process.env.MONGODB_URI || (console.error("Set MONGODB_URI"), process.exit(1)))
   .then(async () => {
     const users = await mongoose.connection.db.collection('users').find({}).toArray();
     

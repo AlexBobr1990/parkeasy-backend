@@ -15,7 +15,8 @@
 
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://parkingapp:wmoU4mDhWsRb4VaQ@eazypark.xhy0jyi.mongodb.net/parkingapp?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) { console.error("Set MONGODB_URI before running this script"); process.exit(1); }
 const OFFSET_MIN = 3;  // Минимум 3м от центра (защита от аномалий)
 const OFFSET_MAX = 15; // Максимум 15м (защита от ошибок координат)
 const OFFSET_DEFAULT = 8; // Дефолт если не удалось измерить

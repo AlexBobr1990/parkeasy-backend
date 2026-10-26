@@ -3143,7 +3143,8 @@ app.post('/api/friends/respond', async (req, res) => {
     if (!friendship) return res.status(404).json({ success: false });
     const me = req.authUserId;
     const isParticipant = [friendship.user1, friendship.user2].some(u => u?.toString() === me);
-    if (!isParticipant || friendship.initiatedBy?.toString() === me) {
+    // Either side may decline/cancel (the app cancels outgoing requests this way); only the recipient may accept
+    if (!isParticipant || (accept && friendship.initiatedBy?.toString() === me)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -4175,8 +4176,9 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
 app.get('/api/help-requests/:id/messages', async (req, res) => {
   try {
     const request = await HelpRequest.findById(req.params.id).select('userId helperId messages').lean();
+    // Non-participants get an empty list (app renders this as an array)
     if (request && req.authUserId !== request.userId?.toString() && req.authUserId !== request.helperId?.toString()) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+      return res.json([]);
     }
     res.json(request?.messages || []);
   } catch (error) {
@@ -4417,7 +4419,12 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
       { status: 'cancelled' },
       { new: true }
     );
-    if (!cancelled) return res.status(400).json({ success: false, message: 'Request is no longer active' });
+    if (!cancelled) {
+      const now = await HelpRequest.findById(request._id).select('status').lean();
+      // Repeat cancel / cancel after expiry: idempotent success without a second refund
+      if (now?.status === 'cancelled' || now?.status === 'expired') return res.json({ success: true });
+      return res.status(400).json({ success: false, message: 'Request is no longer active' });
+    }
 
     // Refund reserved points to requester
     await User.findByIdAndUpdate(request.userId, { $inc: { balance: request.reward } });
@@ -4812,9 +4819,11 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     if (userId !== bookerId && userId !== ownerId) {
       return res.status(403).json({ success: false, message: 'Нет доступа' });
     }
-    if (parking.status === 'completed' || parking.status === 'cancelled') {
-      return res.status(400).json({ success: false, message: 'Booking is already closed' });
+    if (parking.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Deal is already completed' });
     }
+    // Already cancelled by the other side: idempotent no-op (no refund, spot not resurrected)
+    if (parking.status === 'cancelled') return res.json({ success: true });
 
     // Возврат баллов: бронирующему +price, владельцу -ownerEarnings (атомарно — только один возврат)
     const booking = await Booking.findOneAndUpdate(
@@ -5103,8 +5112,9 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
 app.get('/api/parkings/:id/messages', async (req, res) => {
   try {
     const parking = await Parking.findById(req.params.id).select('ownerId bookedBy messages').lean();
+    // Non-participants (e.g. a booker whose booking was just cancelled) get an empty list
     if (parking && req.authUserId !== parking.ownerId?.toString() && req.authUserId !== parking.bookedBy?.toString()) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+      return res.json([]);
     }
     res.json(parking?.messages || []);
   } catch (error) {
@@ -5339,7 +5349,7 @@ app.get('/api/group-chats/:chatId/messages/:userId', async (req, res) => {
     const chat = await GroupChat.findById(req.params.chatId).lean();
     if (!chat) return res.json([]);
     if (!chat.isForum && !chat.members.some(m => m.toString() === req.authUserId)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+      return res.json([]);
     }
     const messages = (chat.messages || []).filter(m =>
       !m.deletedForAll && !(m.deletedFor || []).some(id => id.toString() === req.params.userId)
@@ -5870,7 +5880,7 @@ app.get('/api/convoys/:id/messages', async (req, res) => {
   try {
     const convoy = await Convoy.findById(req.params.id).select('messages members.userId').lean();
     if (convoy && !convoy.members?.some(m => m.userId?.toString() === req.authUserId)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+      return res.json([]);
     }
     res.json(convoy?.messages || []);
   } catch (error) {

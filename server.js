@@ -49,10 +49,24 @@ function requireAuth(req, res, next) {
   }
   try {
     const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
+    if (decoded.type === 'refresh') {
+      return res.status(401).json({ success: false, message: 'Token expired' });
+    }
     req.authUserId = decoded.userId;
     next();
   } catch (e) {
     return res.status(401).json({ success: false, message: 'Token expired' });
+  }
+}
+
+function userIdFromBearer(req) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  try {
+    const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
+    return decoded.type === 'refresh' ? null : decoded.userId;
+  } catch (e) {
+    return null;
   }
 }
 const sharp = require('sharp');
@@ -302,6 +316,8 @@ const motivationalMessages = [
 ];
 
 const app = express();
+// Railway terminates TLS at one proxy hop; without this every client shares the proxy IP in rate limits.
+app.set('trust proxy', 1);
 const httpServer = http.createServer(app);
 
 // ==================== SOCKET.IO ====================
@@ -320,6 +336,18 @@ io.on('connection', async (socket) => {
 
   // Reject connections without userId
   if (!userId) { socket.disconnect(true); return; }
+
+  // Token must match the claimed userId. Released app builds don't send a token yet,
+  // so token-less sockets stay allowed until WS_REQUIRE_TOKEN=1 is set.
+  const wsToken = socket.handshake.auth?.token;
+  if (wsToken || process.env.WS_REQUIRE_TOKEN === '1') {
+    let tokenUserId = null;
+    try {
+      const decoded = jwt.verify(wsToken || '', JWT_SECRET);
+      if (decoded.type !== 'refresh') tokenUserId = decoded.userId;
+    } catch (e) {}
+    if (!tokenUserId || tokenUserId !== String(userId)) { socket.disconnect(true); return; }
+  }
 
   if (userId) {
     // Validate userId exists in DB
@@ -435,27 +463,54 @@ app.use(express.json({ limit: '10mb' }));
 
 // ==================== ADMIN PROTECTION ====================
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
-const adminAuth = async (req, res, next) => {
-  // Способ 1: секретный ключ через header или query
+
+// Admin = x-admin-secret, or a valid JWT whose user has isAdmin. Client-supplied adminId is never trusted.
+async function isAdminRequest(req) {
   const secret = req.headers['x-admin-secret'] || req.query.secret;
-  if (ADMIN_SECRET && secret === ADMIN_SECRET) return next();
-  
-  // Способ 2: adminId в body/query — проверяем что пользователь реально админ
-  const adminId = req.body?.adminId || req.query?.adminId || req.headers['x-admin-id'];
-  if (adminId) {
-    try {
-      const admin = await User.findById(adminId).select('isAdmin').lean();
-      if (admin?.isAdmin) return next();
-    } catch (e) {}
+  if (ADMIN_SECRET && secret === ADMIN_SECRET) return true;
+  const userId = userIdFromBearer(req);
+  if (!userId) return false;
+  try {
+    const admin = await User.findById(userId).select('isAdmin').lean();
+    return !!admin?.isAdmin;
+  } catch (e) {
+    return false;
   }
-  
-  // Если ADMIN_SECRET не установлен — блокируем все admin запросы
-  if (!ADMIN_SECRET) {
-    console.error(`🚫 ADMIN endpoint BLOCKED (no ADMIN_SECRET): ${req.method} ${req.path}`);
-  }
-  
+}
+
+const adminAuth = async (req, res, next) => {
+  if (await isAdminRequest(req)) return next();
   return res.status(403).json({ success: false, message: 'Admin access denied' });
 };
+
+// Every "acting user" in a request must be the token's user; private per-user reads are self-only.
+const ACTOR_FIELDS = ['userId', 'fromUserId', 'creatorId', 'ownerId', 'helperId', 'callerUserId'];
+const SELF_ONLY_GET = /^\/users\/([^/]+)\/(unread-messages|friend-requests|outgoing-requests|blocked|history|my-help-request|my-parkings|my-booking|completed-bookings|convoys|daily-tasks|streak|referral-stats|balance|friends-all)$/;
+const USER_PATH_KEYWORDS = new Set(['block', 'mute', 'unblock', 'unmute', 'search-by-email', 'is-blocked', 'is-muted']);
+function bindActor(req, res, next) {
+  const me = req.authUserId;
+  const deny = () => res.status(403).json({ success: false, message: 'Access denied' });
+  const p = req.path;
+  if (req.query.userId && req.query.userId !== me) return deny();
+  if (req.method === 'GET') {
+    let m = p.match(SELF_ONLY_GET);
+    if (m && m[1] !== me) return deny();
+    m = p.match(/^\/friends\/messages\/[^/]+\/([^/]+)$/) || p.match(/^\/group-chats\/[^/]+\/messages\/([^/]+)$/) || p.match(/^\/group-chats\/([^/]+)$/);
+    if (m && m[1] !== me) return deny();
+    return next();
+  }
+  let m = p.match(/^\/users\/([^/]+)(\/|$)/);
+  if (m && !USER_PATH_KEYWORDS.has(m[1]) && m[1] !== me) return deny();
+  m = p.match(/^\/users\/(unblock|unmute)\/([^/]+)\//);
+  if (m && m[2] !== me) return deny();
+  if (!req.body || typeof req.body !== 'object') req.body = {};
+  for (const f of ACTOR_FIELDS) {
+    if (req.body[f] != null && String(req.body[f]) !== me) return deny();
+  }
+  // Older handlers only check ownership "if userId was sent"; always send it.
+  if (req.body.userId == null) req.body.userId = me;
+  next();
+}
 
 // Применяем ко всем /api/admin/* маршрутам
 app.use('/api/admin', adminAuth);
@@ -463,7 +518,7 @@ app.use('/api/admin', adminAuth);
 app.use('/api', (req, res, next) => {
   const publicPaths = ['/auth/', '/referral/', '/tickets/', '/settings/', '/parkings/nearby', '/stats', '/upload-product-image'];
   if (publicPaths.some(p => req.path.startsWith(p))) return next();
-  return requireAuth(req, res, next);
+  return requireAuth(req, res, () => (req.path.startsWith('/admin/') ? next() : bindActor(req, res, next)));
 });
 
 // ==================== REQUEST COUNTER ====================
@@ -1327,8 +1382,9 @@ setInterval(async () => {
     // Auto-expire and refund stale SOS help requests
     const staleHelp = await HelpRequest.find({ status: { $in: ['active', 'accepted'] }, expiresAt: { $lte: new Date() } });
     for (const h of staleHelp) {
-      h.status = 'expired';
-      await h.save();
+      // Atomic transition so concurrent timers/instances/cancels refund only once
+      const r = await HelpRequest.updateOne({ _id: h._id, status: { $in: ['active', 'accepted'] } }, { status: 'expired' });
+      if (!r.modifiedCount) continue;
       await User.findByIdAndUpdate(h.userId, { $inc: { balance: h.reward } });
       await new Transaction({ userId: h.userId, type: 'help_refund', amount: h.reward, description: `SOS expired refund: ${h.problemType}` }).save();
     }
@@ -1911,6 +1967,12 @@ app.post('/api/upload-product-image', async (req, res) => {
   try {
     const { imageUrl, asin } = req.body;
     if (!imageUrl || !asin) return res.json({ success: false });
+    // Unauthenticated (website admin calls it from the browser): only Amazon product images may be stored
+    let host = '';
+    try { const u = new URL(imageUrl); host = u.protocol === 'https:' ? u.hostname : ''; } catch (e) {}
+    if (!/(^|\.)(media-amazon\.com|ssl-images-amazon\.com|images-amazon\.com)$/.test(host) || !/^[A-Za-z0-9]{6,24}$/.test(String(asin))) {
+      return res.status(400).json({ success: false, message: 'Image URL not allowed' });
+    }
     const result = await cloudinary.uploader.upload(imageUrl, {
       folder: 'parkbro/store',
       public_id: `product_${asin}`,
@@ -2613,7 +2675,12 @@ app.post('/api/friends/request-parking', async (req, res) => {
 app.post('/api/friends/respond-parking-request', async (req, res) => {
   try {
     const { requestId, accepted } = req.body;
-    
+
+    const existing = await ParkingRequest.findById(requestId).select('toUserId').lean();
+    if (!existing) return res.status(404).json({ success: false });
+    if (existing.toUserId?.toString() !== req.authUserId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     const request = await ParkingRequest.findByIdAndUpdate(
       requestId,
       { status: accepted ? 'accepted' : 'declined' },
@@ -2662,7 +2729,10 @@ app.post('/api/parkings/:id/send-to-friend', async (req, res) => {
     if (!parking || !friend) {
       return res.status(404).json({ success: false });
     }
-    
+    if (parking.ownerId?._id?.toString() !== req.authUserId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     // Добавляем друга в приоритетный список
     parking.priorityUser = friendId;
     await parking.save();
@@ -3068,10 +3138,15 @@ app.post('/api/friends/request', async (req, res) => {
 app.post('/api/friends/respond', async (req, res) => {
   try {
     const { friendshipId, accept } = req.body;
-    
+
     const friendship = await Friendship.findById(friendshipId);
     if (!friendship) return res.status(404).json({ success: false });
-    
+    const me = req.authUserId;
+    const isParticipant = [friendship.user1, friendship.user2].some(u => u?.toString() === me);
+    if (!isParticipant || friendship.initiatedBy?.toString() === me) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     friendship.status = accept ? 'accepted' : 'declined';
     await friendship.save();
     
@@ -3164,7 +3239,9 @@ app.get('/api/users/:id/outgoing-requests', async (req, res) => {
 // Удалить из друзей
 app.delete('/api/friends/:friendshipId', async (req, res) => {
   try {
-    await Friendship.findByIdAndDelete(req.params.friendshipId);
+    const me = req.authUserId;
+    const deleted = await Friendship.findOneAndDelete({ _id: req.params.friendshipId, $or: [{ user1: me }, { user2: me }] });
+    if (!deleted) return res.status(403).json({ success: false, message: 'Access denied' });
     res.json({ success: true });
   } catch (error) {
     console.log("DELETE FRIEND ERROR:", error);
@@ -3682,8 +3759,12 @@ app.post('/api/auth/refresh', async (req, res) => {
 
 app.post('/api/ratings', async (req, res) => {
   try {
-    const { fromUserId, toUserId, bookingId, rating, problems, comment } = req.body;
-    
+    const { fromUserId, toUserId, bookingId, problems, comment } = req.body;
+    const rating = Number(req.body.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, message: 'Rating must be 1-5' });
+    }
+
     // Проверяем что бронирование существует и завершено
     const booking = await Booking.findById(bookingId);
     if (!booking || booking.status !== 'completed') {
@@ -3751,8 +3832,12 @@ app.post('/api/ratings', async (req, res) => {
 // Рейтинг для помощи на дороге
 app.post('/api/ratings/help', async (req, res) => {
   try {
-    const { fromUserId, toUserId, helpRequestId, rating, problems, comment } = req.body;
-    
+    const { fromUserId, toUserId, helpRequestId, problems, comment } = req.body;
+    const rating = Number(req.body.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, message: 'Rating must be 1-5' });
+    }
+
     const request = await HelpRequest.findById(helpRequestId);
     if (!request || request.status !== 'completed') {
       return res.status(400).json({ success: false, message: 'Help request not found or not completed' });
@@ -3818,8 +3903,11 @@ app.get('/api/users/:id/balance', async (req, res) => {
 
 app.get('/api/users/:id', async (req, res) => {
   try {
+    const isSelf = req.params.id === req.authUserId;
     const user = await User.findById(req.params.id)
-      .select('-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -__v')
+      .select(isSelf
+        ? '-password -resetCode -resetCodeExpires -verificationCode -verificationExpires -pushToken -googleId -appleId -__v'
+        : 'name avatar avatarThumb car rating ratingCount parkingsGiven parkingsReceived totalPointsEarned achievements currentStreak lastActivity hideOnline language createdAt')
       .lean();
     if (!user) return res.status(404).json(null);
     res.json({ ...user, id: user._id.toString() });
@@ -3965,8 +4053,8 @@ app.post('/api/help-requests/create', async (req, res) => {
     // Auto-expire and refund any stale requests (backup — timer handles most cases)
     const stale = await HelpRequest.find({ userId, status: { $in: ['active', 'accepted'] }, expiresAt: { $lte: new Date() } });
     for (const s of stale) {
-      s.status = 'expired';
-      await s.save();
+      const r = await HelpRequest.updateOne({ _id: s._id, status: { $in: ['active', 'accepted'] } }, { status: 'expired' });
+      if (!r.modifiedCount) continue;
       await User.findByIdAndUpdate(userId, { $inc: { balance: s.reward } });
       await new Transaction({ userId, type: 'help_refund', amount: s.reward, description: `SOS expired refund: ${s.problemType}` }).save();
     }
@@ -4001,17 +4089,20 @@ app.post('/api/help-requests/create', async (req, res) => {
 
 app.post('/api/help-requests/:id/accept', async (req, res) => {
   try {
-    const { helperId } = req.body;
-    const request = await HelpRequest.findById(req.params.id);
-    if (!request || request.status !== 'active') return res.status(404).json({ success: false });
+    const helperId = req.authUserId;
+    const current = await HelpRequest.findById(req.params.id).select('status userId').lean();
+    if (!current || current.status !== 'active') return res.status(404).json({ success: false });
     // Нельзя помогать самому себе
-    if (request.userId.toString() === helperId) {
+    if (current.userId.toString() === helperId) {
       return res.status(400).json({ success: false, message: 'Cannot accept own help request' });
     }
-    request.status = 'accepted';
-    request.helperId = helperId;
-    request.expiresAt = new Date(Date.now() + 2 * 60 * 60000); // Extend to 2 hours when accepted
-    await request.save();
+    // Atomic: only one helper can win the request
+    const request = await HelpRequest.findOneAndUpdate(
+      { _id: req.params.id, status: 'active' },
+      { status: 'accepted', helperId, expiresAt: new Date(Date.now() + 2 * 60 * 60000) },
+      { new: true }
+    );
+    if (!request) return res.status(409).json({ success: false, message: 'Already accepted' });
     
     // 🔌 WebSocket: запрос помощи принят
     emitToUser(request.userId, 'help:accepted', { helpRequest: request.toObject() });
@@ -4041,6 +4132,7 @@ app.post('/api/help-requests/:id/update-helper-location', async (req, res) => {
     const { location } = req.body;
     const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
+    if (request.helperId?.toString() !== req.authUserId) return res.status(403).json({ success: false, message: 'Access denied' });
     request.helperLocation = location;
     await request.save();
     res.json({ success: true });
@@ -4053,6 +4145,7 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
   try {
     const request = await HelpRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false });
+    if (request.helperId?.toString() !== req.authUserId) return res.status(403).json({ success: false, message: 'Access denied' });
     request.helperArrived = true;
     await request.save();
     
@@ -4081,7 +4174,10 @@ app.post('/api/help-requests/:id/helper-arrived', async (req, res) => {
 // Сообщения в помощи на дороге
 app.get('/api/help-requests/:id/messages', async (req, res) => {
   try {
-    const request = await HelpRequest.findById(req.params.id);
+    const request = await HelpRequest.findById(req.params.id).select('userId helperId messages').lean();
+    if (request && req.authUserId !== request.userId?.toString() && req.authUserId !== request.helperId?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     res.json(request?.messages || []);
   } catch (error) {
     res.json([]);
@@ -4170,12 +4266,17 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     
     const isRequester = callerUserId === request.userId.toString();
     const isHelper = callerUserId === request.helperId.toString();
-    
-    // ШАГ 1: Помечаем подтверждение вызывающей стороны
-    if (isRequester) request.requesterConfirmed = true;
-    if (isHelper) request.helperConfirmed = true;
-    await request.save();
-    
+
+    // ШАГ 1: Помечаем подтверждение вызывающей стороны (атомарно, чтобы видеть флаг второй стороны)
+    const confirmed = await HelpRequest.findOneAndUpdate(
+      { _id: request._id, status: 'accepted' },
+      { $set: isRequester ? { requesterConfirmed: true } : { helperConfirmed: true } },
+      { new: true }
+    );
+    if (!confirmed) return res.status(400).json({ success: false, message: 'Request is not in accepted status' });
+    request.requesterConfirmed = confirmed.requesterConfirmed;
+    request.helperConfirmed = confirmed.helperConfirmed;
+
     // Если только одна сторона подтвердила — ждём вторую
     if (!request.requesterConfirmed || !request.helperConfirmed) {
       // 🔌 WebSocket: уведомляем другую сторону что нужно подтвердить
@@ -4242,11 +4343,16 @@ app.post('/api/help-requests/:id/complete', async (req, res) => {
     const commissionRate = commissionMap[helperLevel] || 0.25;
     const helperEarnings = Math.floor(request.reward * (1 - commissionRate));
 
+    // Atomic accepted → completed: exactly one caller pays out
+    const completedNow = await HelpRequest.findOneAndUpdate(
+      { _id: request._id, status: 'accepted', requesterConfirmed: true, helperConfirmed: true },
+      { status: 'completed' },
+      { new: true }
+    );
+    if (!completedNow) return res.json({ success: true, status: 'completed' });
+
     // Credit helper (points were already deducted from requester at creation)
     await User.findByIdAndUpdate(request.helperId, { $inc: { balance: helperEarnings, totalPointsEarned: helperEarnings } });
-
-    request.status = 'completed';
-    await request.save();
 
     await Transaction.create({ userId: request.helperId, type: 'help_reward', amount: helperEarnings, description: 'Help reward' });
     
@@ -4301,12 +4407,17 @@ app.post('/api/help-requests/:id/cancel', async (req, res) => {
     if (!request) return res.status(404).json({ success: false });
 
     // Only requester or helper can cancel
-    if (userId && request.userId.toString() !== userId && request.helperId?.toString() !== userId) {
+    if (request.userId.toString() !== userId && request.helperId?.toString() !== userId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    request.status = 'cancelled';
-    await request.save();
+    // Atomic: refund only on the transition out of active/accepted (no repeat/after-completion refunds)
+    const cancelled = await HelpRequest.findOneAndUpdate(
+      { _id: request._id, status: { $in: ['active', 'accepted'] } },
+      { status: 'cancelled' },
+      { new: true }
+    );
+    if (!cancelled) return res.status(400).json({ success: false, message: 'Request is no longer active' });
 
     // Refund reserved points to requester
     await User.findByIdAndUpdate(request.userId, { $inc: { balance: request.reward } });
@@ -4701,9 +4812,16 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
     if (userId !== bookerId && userId !== ownerId) {
       return res.status(403).json({ success: false, message: 'Нет доступа' });
     }
+    if (parking.status === 'completed' || parking.status === 'cancelled') {
+      return res.status(400).json({ success: false, message: 'Booking is already closed' });
+    }
 
-    // Возврат баллов: бронирующему +price, владельцу -ownerEarnings
-    const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
+    // Возврат баллов: бронирующему +price, владельцу -ownerEarnings (атомарно — только один возврат)
+    const booking = await Booking.findOneAndUpdate(
+      { parkingId: parking._id, status: 'active' },
+      { status: 'cancelled' },
+      { new: true }
+    );
     if (booking && bookerId) {
       const refundAmount = booking.price || parking.price;
       const ownerEarnings = booking.ownerEarnings != null ? booking.ownerEarnings : Math.floor(refundAmount * 0.75);
@@ -4727,27 +4845,16 @@ app.post('/api/parkings/:id/cancel-booking', async (req, res) => {
         }
       }
       await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Отмена бронирования: ${parking.address}` }).save();
-      
-      // Помечаем бронирование как отменённое
-      booking.status = 'cancelled';
-      await booking.save();
-      
+
       console.log(`💸 Refund: booker +${refundAmount}, owner -${ownerEarnings} for parking ${parking.address}`);
     }
 
-    // Restore parking only if not expired
-    if (parking.expiresAt && new Date(parking.expiresAt) > new Date()) {
-      parking.status = 'available';
-    } else {
-      parking.status = 'expired';
-    }
-    parking.bookedBy = null;
-    parking.bookedAt = null;
-    parking.bookerCar = null;
-    parking.bookerName = null;
-    parking.bookerAvatar = null;
-    parking.messages = [];
-    await parking.save();
+    // Restore parking only if not expired; only from booked/expired, never from completed
+    const stillOpen = parking.expiresAt && new Date(parking.expiresAt) > new Date();
+    await Parking.updateOne(
+      { _id: parking._id, status: { $in: ['booked', 'expired'] } },
+      { status: stillOpen ? 'available' : 'expired', bookedBy: null, bookedAt: null, bookerCar: null, bookerName: null, bookerAvatar: null, messages: [] }
+    );
     
     // 🔌 WebSocket: бронирование отменено
     emitToAll('booking:cancelled', { parkingId: parking._id.toString() });
@@ -4776,9 +4883,17 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Нет доступа' });
     }
     
+    if (parking.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Deal is already completed' });
+    }
+
     // Если парковка была забронирована — рефанд бронирующему
     if (parking.status === 'booked' && parking.bookedBy) {
-      const booking = await Booking.findOne({ parkingId: parking._id, status: 'active' });
+      const booking = await Booking.findOneAndUpdate(
+        { parkingId: parking._id, status: 'active' },
+        { status: 'cancelled' },
+        { new: true }
+      );
       if (booking) {
         const refundAmount = booking.price || parking.price;
         const ownerEarnings = booking.ownerEarnings != null ? booking.ownerEarnings : Math.floor(refundAmount * 0.75);
@@ -4800,10 +4915,7 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
           }
         }
         await new Transaction({ userId: ownerId, type: 'cancellation', amount: -ownerEarnings, description: `Владелец отменил: ${parking.address}` }).save();
-        
-        booking.status = 'cancelled';
-        await booking.save();
-        
+
         console.log(`💸 Owner cancelled booked parking: refund +${refundAmount} to booker, -${ownerEarnings} from owner`);
       }
     } else {
@@ -4821,7 +4933,8 @@ app.post('/api/parkings/:id/cancel-waiting', async (req, res) => {
 
 app.post('/api/parkings/:id/update-location', async (req, res) => {
   try {
-    await Parking.findByIdAndUpdate(req.params.id, { bookerLocation: req.body.location });
+    const r = await Parking.updateOne({ _id: req.params.id, bookedBy: req.authUserId }, { bookerLocation: req.body.location });
+    if (!r.matchedCount) return res.status(403).json({ success: false, message: 'Access denied' });
     res.json({ success: true });
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -4881,14 +4994,17 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     
-    // Проверка: парковка должна быть в статусе booked
-    if (parking.status !== 'booked') {
+    // Проверка: парковка должна быть в статусе booked; переход booked → completed атомарный (один раз)
+    const completedNow = await Parking.findOneAndUpdate(
+      { _id: parking._id, status: 'booked' },
+      { status: 'completed', confirmedAt: new Date() },
+      { new: true }
+    );
+    if (!completedNow) {
       return res.status(400).json({ success: false, message: 'Parking is not booked' });
     }
-    
-    parking.confirmedAt = new Date();
     parking.status = 'completed';
-    await parking.save();
+    parking.confirmedAt = completedNow.confirmedAt;
     
     const booking = await Booking.findOneAndUpdate(
       { parkingId: parking._id, status: 'active' },
@@ -4986,7 +5102,10 @@ app.post('/api/parkings/:id/confirm-meet', async (req, res) => {
 
 app.get('/api/parkings/:id/messages', async (req, res) => {
   try {
-    const parking = await Parking.findById(req.params.id);
+    const parking = await Parking.findById(req.params.id).select('ownerId bookedBy messages').lean();
+    if (parking && req.authUserId !== parking.ownerId?.toString() && req.authUserId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     res.json(parking?.messages || []);
   } catch (error) {
     console.log("CREATE PARKING ERROR:", error);
@@ -5094,7 +5213,10 @@ app.post("/api/parkings/:id/wait-response", async (req, res) => {
     const { accepted, userId } = req.body;
     const parking = await Parking.findById(req.params.id);
     if (!parking) return res.status(404).json({ success: false });
-    
+    if (userId !== parking.ownerId?.toString() && userId !== parking.bookedBy?.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     // Запоминаем кто запросил ожидание до обнуления
     const waitRequestFromUserId = parking.waitRequest?.fromUserId?.toString();
     
@@ -5216,7 +5338,10 @@ app.get('/api/group-chats/:chatId/messages/:userId', async (req, res) => {
   try {
     const chat = await GroupChat.findById(req.params.chatId).lean();
     if (!chat) return res.json([]);
-    const messages = (chat.messages || []).filter(m => 
+    if (!chat.isForum && !chat.members.some(m => m.toString() === req.authUserId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const messages = (chat.messages || []).filter(m =>
       !m.deletedForAll && !(m.deletedFor || []).some(id => id.toString() === req.params.userId)
     );
     res.json(messages);
@@ -5231,6 +5356,9 @@ app.post('/api/group-chats/:chatId/message', async (req, res) => {
     const { fromUserId, text, imageBase64, replyTo } = req.body;
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
+    if (!chat.isForum && !chat.members.some(m => m.toString() === fromUserId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
 
     // Check if sender is blocked by any member (for non-forum chats)
     if (!chat.isForum) {
@@ -5382,7 +5510,10 @@ app.patch('/api/group-chats/:chatId/members', async (req, res) => {
     const { memberIds } = req.body;
     const chat = await GroupChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false });
-    
+    if (!chat.members.some(m => m.toString() === req.authUserId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     memberIds.forEach(id => {
       if (!chat.members.some(m => m.toString() === id)) {
         chat.members.push(id);
@@ -5582,6 +5713,9 @@ app.get('/api/convoys/:id', async (req, res) => {
   try {
     const convoy = await Convoy.findById(req.params.id).lean();
     if (!convoy) return res.status(404).json({ success: false });
+    if (!convoy.members?.some(m => m.userId?.toString() === req.authUserId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     res.json(convoy);
   } catch (error) {
     res.status(500).json({ success: false });
@@ -5596,13 +5730,9 @@ app.post('/api/convoys/:id/join', async (req, res) => {
     if (!convoy || convoy.status !== 'active') return res.status(404).json({ success: false });
     
     const member = convoy.members.find(m => m.userId?.toString() === userId);
-    if (member) {
-      member.status = 'active';
-      member.joinedAt = new Date();
-    } else {
-      const user = await User.findById(userId).select('name avatarThumb').lean();
-      convoy.members.push({ userId, name: user?.name, avatar: user?.avatarThumb, status: 'active', joinedAt: new Date() });
-    }
+    if (!member) return res.status(403).json({ success: false, message: 'Not invited' });
+    member.status = 'active';
+    member.joinedAt = new Date();
     await convoy.save();
     
     // WS: уведомить всех в комнате
@@ -5738,7 +5868,10 @@ app.post('/api/convoys/:id/status', async (req, res) => {
 // Сообщения конвоя
 app.get('/api/convoys/:id/messages', async (req, res) => {
   try {
-    const convoy = await Convoy.findById(req.params.id).select('messages').lean();
+    const convoy = await Convoy.findById(req.params.id).select('messages members.userId').lean();
+    if (convoy && !convoy.members?.some(m => m.userId?.toString() === req.authUserId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     res.json(convoy?.messages || []);
   } catch (error) {
     res.json([]);
@@ -6458,7 +6591,7 @@ app.post('/api/users/:id/daily-tasks/:taskCode/claim', async (req, res) => {
 
     // Atomic claim: only update if not already claimed (prevents race condition)
     const claimed = await UserDailyProgress.findOneAndUpdate(
-      { _id: progress._id, 'tasks.code': taskCode, 'tasks.rewardClaimed': false },
+      { _id: progress._id, tasks: { $elemMatch: { code: taskCode, completed: true, rewardClaimed: false } } },
       { $set: { 'tasks.$.rewardClaimed': true } },
       { new: true }
     );
@@ -6498,9 +6631,12 @@ app.post('/api/users/:id/daily-tasks/claim-all-bonus', async (req, res) => {
     const settings = await getGameSettings();
     const bonus = settings?.allDailyTasksBonus || 25;
     
-    progress.allTasksBonusClaimed = true;
-    await progress.save();
-    
+    const marked = await UserDailyProgress.findOneAndUpdate(
+      { _id: progress._id, allTasksBonusClaimed: { $ne: true } },
+      { $set: { allTasksBonusClaimed: true } }
+    );
+    if (!marked) return res.json({ success: false });
+
     const user = await User.findByIdAndUpdate(userId, { $inc: { balance: bonus, totalPointsEarned: bonus } }, { new: true });
     
     await new Transaction({ userId, amount: bonus, type: 'daily_task', description: 'All daily tasks completed' }).save();
@@ -6822,17 +6958,10 @@ app.get('/api/settings/booking-radius', async (req, res) => {
 // Admin endpoint — изменить радиус (вне /api/admin/ чтобы не блокировался middleware)
 app.put('/api/settings/booking-radius', async (req, res) => {
   try {
-    const { bookingRadiusKm, adminId } = req.body;
-    
-    // Проверка админ-доступа
-    if (adminId) {
-      const admin = await User.findById(adminId).select('isAdmin').lean();
-      if (!admin?.isAdmin) return res.status(403).json({ success: false, message: 'Admin access denied' });
-    } else {
-      const secret = req.headers['x-admin-secret'] || req.query.secret;
-      if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
-        return res.status(403).json({ success: false, message: 'Admin access denied' });
-      }
+    const { bookingRadiusKm } = req.body;
+
+    if (!(await isAdminRequest(req))) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
     }
     
     const radius = Math.max(1, Math.min(50, Number(bookingRadiusKm) || 5));
@@ -6875,17 +7004,10 @@ app.get('/api/settings/push-schedule', async (req, res) => {
 
 app.put('/api/settings/push-schedule', async (req, res) => {
   try {
-    const { pushHour_morning, pushHour_evening, adminId } = req.body;
+    const { pushHour_morning, pushHour_evening } = req.body;
 
-    // Проверка админ-доступа
-    if (adminId) {
-      const admin = await User.findById(adminId).select('isAdmin').lean();
-      if (!admin?.isAdmin) return res.status(403).json({ success: false, message: 'Admin access denied' });
-    } else {
-      const secret = req.headers['x-admin-secret'] || req.query.secret;
-      if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
-        return res.status(403).json({ success: false, message: 'Admin access denied' });
-      }
+    if (!(await isAdminRequest(req))) {
+      return res.status(403).json({ success: false, message: 'Admin access denied' });
     }
 
     const mh = Math.max(0, Math.min(23, Number(pushHour_morning)));
@@ -6916,8 +7038,9 @@ app.get('/api/tickets/check', async (req, res) => {
     const { plate, state } = req.query;
     if (!plate) return res.json({ success: false, message: 'Plate number is required' });
 
-    const stateCode = (state || 'NY').toUpperCase();
+    const stateCode = (state || 'NY').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2) || 'NY';
     const plateClean = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!plateClean) return res.json({ success: false, message: 'Plate number is required' });
 
     // NYC Open Data SODA API - Open Parking and Camera Violations
     const url = `https://data.cityofnewyork.us/resource/nc67-uf89.json?$where=plate='${plateClean}' AND state='${stateCode}'&$order=issue_date DESC&$limit=500`;
@@ -6944,6 +7067,9 @@ app.get('/api/tickets/check', async (req, res) => {
       paymentAmount: parseFloat(t.payment_amount || 0),
       reductionAmount: parseFloat(t.reduction_amount || 0),
     }));
+    // issue_date is "MM/DD/YYYY" text, so the API's own ordering is by month, not by date
+    const issueTime = s => { const [m, d, y] = (s || '').split('/'); return y ? Date.UTC(+y, +m - 1, +d) : 0; };
+    tickets.sort((a, b) => issueTime(b.issueDate) - issueTime(a.issueDate));
 
     const openTickets = tickets.filter(t => t.status === 'open');
     const totalDue = openTickets.reduce((sum, t) => sum + t.amountDue, 0);
@@ -7058,7 +7184,7 @@ app.get('/api/asp/zones', async (req, res) => {
                 const [rH, rM] = rule.startTime.split(':').map(Number);
                 const [cH, cM] = currentTime.split(':').map(Number);
                 const diffMin = (rH * 60 + rM) - (cH * 60 + cM);
-                if (diffMin <= 60 && diffMin > 0) {
+                if (diffMin <= 60 && diffMin > 0 && status !== 'active') {
                   status = 'soon';
                 }
               }
